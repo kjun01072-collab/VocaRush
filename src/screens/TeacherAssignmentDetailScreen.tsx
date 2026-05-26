@@ -4,11 +4,12 @@ import { Badge, Card, ProgressBar, Row, SectionHeader } from "../components/comm
 import { useI18n } from "../i18n";
 import { COLORS, RADII, TYPO } from "../theme";
 import { AcademyClass, StudentProfile, VocabularyAssignment } from "../types";
+import { getAssignmentAvailability } from "../utils/assignmentAvailability";
 
 function TopBack({ title, onBack }: { title: string; onBack: () => void }) {
   const { t } = useI18n();
   return (
-    <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
+    <Row style={[styles.stickyHeader, { justifyContent: "space-between", alignItems: "center" }]}>
       <Pressable onPress={onBack} style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.9 }]}>
         <Text style={styles.backText}>‹ {t("뒤로")}</Text>
       </Pressable>
@@ -39,6 +40,7 @@ export function TeacherAssignmentDetailScreen({
 }) {
   const { t } = useI18n();
   const classStudents = useMemo(() => students.filter((s) => s.classId === cls.id), [students, cls.id]);
+  const availability = getAssignmentAvailability(assignment);
 
   const completionRate = useMemo(() => {
     const statuses = Object.values(assignment.statusByStudent);
@@ -58,7 +60,7 @@ export function TeacherAssignmentDetailScreen({
   }, [classStudents, assignment.progressByStudent]);
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll}>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll} stickyHeaderIndices={[0]}>
       <TopBack title={t("과제 상세")} onBack={onBack} />
 
       <Card style={{ marginTop: 12 }}>
@@ -67,9 +69,16 @@ export function TeacherAssignmentDetailScreen({
           {t(cls.name)} · {t("단어")} {assignment.wordIds.length}{t("개")} · {t("마감")} {assignment.dueDate}
         </Text>
         <Row style={{ marginTop: 10, flexWrap: "wrap" }}>
+          <Badge label={t(assignment.assignmentKind || "단어 과제")} tone={assignment.assignmentKind === "수업 전 단어 테스트" ? "violet" : "default"} />
+          <Badge label={t(availability.statusLabel)} tone={availability.isOpen ? "blue" : "default"} />
           <Badge label={`${t("필수 정답률")} ${assignment.requiredAccuracy}%`} tone="violet" />
           <Badge label={`${t("완료율")} ${completionRate}%`} tone="blue" />
         </Row>
+        <View style={styles.releaseBox}>
+          <Text style={styles.releaseTitle}>{t(availability.releaseLabel)}</Text>
+          <Text style={styles.muted}>{t("공개")}: {availability.availableLabel}</Text>
+          {availability.classStartLabel ? <Text style={styles.muted}>{t("수업 시작")}: {availability.classStartLabel}</Text> : null}
+        </View>
         <View style={{ marginTop: 10 }}>
           <ProgressBar value={completionRate} />
         </View>
@@ -135,6 +144,7 @@ export function TeacherAssignmentDetailScreen({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.bg, paddingHorizontal: 20 },
   scroll: { paddingTop: 18, paddingBottom: 115 },
+  stickyHeader: { backgroundColor: COLORS.bg, paddingBottom: 10, zIndex: 10 },
   backBtn: { height: 48, minWidth: 82, paddingHorizontal: 12, borderRadius: 24, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.line, justifyContent: "center" },
   backText: { color: COLORS.text, fontWeight: "800" },
   topTitle: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h3, textAlign: "center", flex: 1 },
@@ -142,6 +152,8 @@ const styles = StyleSheet.create({
   itemTitle: { color: COLORS.text, fontWeight: "800" },
   muted: { color: COLORS.muted, lineHeight: TYPO.smallLine, fontSize: TYPO.small, marginTop: 6 },
   mutedSmall: { color: COLORS.muted, lineHeight: TYPO.smallLine, fontSize: TYPO.small, marginTop: 10 },
+  releaseBox: { backgroundColor: COLORS.card2, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, padding: 12, marginTop: 12 },
+  releaseTitle: { color: COLORS.text, fontWeight: "900" },
   rightHint: { color: "#BCA8FF", fontWeight: "800" },
   secondaryBtn: { backgroundColor: COLORS.card2, borderRadius: 14, minHeight: 52, justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: COLORS.line, marginTop: 10 },
   secondaryBtnText: { color: COLORS.text, fontWeight: "800" },

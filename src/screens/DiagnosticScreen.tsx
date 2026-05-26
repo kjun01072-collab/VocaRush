@@ -1,14 +1,15 @@
 ﻿import React, { useMemo, useState } from "react";
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Badge, Card, Row, SectionHeader } from "../components/common";
+import { getLearningCourseMeta, LEARNING_COURSES, wordMatchesLearningCourse } from "../data/learningCatalog";
 import { useI18n } from "../i18n";
-import { COLORS, RADII, TYPO, clamp } from "../theme";
-import { DiagnosticResult, DiagnosticTestType, QuizQuestion, StudySet, VocabItem } from "../types";
+import { COLORS, TYPO } from "../theme";
+import { DiagnosticResult, DiagnosticTestType, LearningCourse, QuizQuestion, VocabItem } from "../types";
 
 function TopBack({ title, onBack }: { title: string; onBack: () => void }) {
   const { t } = useI18n();
   return (
-    <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
+    <Row style={[styles.stickyHeader, { justifyContent: "space-between", alignItems: "center" }]}>
       <Pressable onPress={onBack} style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.9 }]}>
         <Text style={styles.backText}>‹ {t("뒤로")}</Text>
       </Pressable>
@@ -43,21 +44,65 @@ function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
 
-function choiceSet(correct: string, wrongs: string[], seed: number) {
+const FALLBACK_TYPES = [
+  "어휘 추론",
+  "문맥 이해",
+  "근거 찾기",
+  "주장 파악",
+  "정보 선택",
+  "자료형",
+  "그래프 해석",
+  "비교·대조",
+  "사회 문제",
+  "경제",
+  "정치 제도",
+  "지리",
+  "세계사",
+  "비즈니스 영어",
+  "스타트업 영어",
+  "비즈니스 일본어",
+  "대학생 표현",
+];
+
+function choiceSet(correct: string, wrongs: string[], seed: number, targetCount = 4) {
   const cleanCorrect = correct.trim();
   const cleanWrongs = uniq(
     wrongs
       .map((item) => item.trim())
       .filter((item) => item && item !== cleanCorrect)
-  ).slice(0, 3);
+  ).slice(0, targetCount - 1);
   const choices = cleanWrongs.slice();
   const slot = choices.length ? Math.abs(seed + cleanCorrect.length * 13) % (choices.length + 1) : 0;
   choices.splice(slot, 0, cleanCorrect);
   return choices;
 }
 
+function similarWords(word: VocabItem, pool: VocabItem[], seed: number) {
+  const samePart = pool.filter((w) => w.id !== word.id && w.subject === word.subject && w.part === word.part);
+  const sameSubject = pool.filter((w) => w.id !== word.id && w.subject === word.subject);
+  const sameType = pool.filter(
+    (w) => w.id !== word.id && w.questionTypes.some((type) => word.questionTypes.includes(type))
+  );
+  const fallback = pool.filter((w) => w.id !== word.id);
+  const ranked = uniq([...samePart, ...sameType, ...sameSubject, ...fallback]);
+  return shuffle(ranked, seed);
+}
+
+function distractors(
+  word: VocabItem,
+  pool: VocabItem[],
+  seed: number,
+  selector: (item: VocabItem) => string,
+  extras: string[] = []
+) {
+  return similarWords(word, pool, seed)
+    .map(selector)
+    .concat(extras)
+    .filter(Boolean);
+}
+
 function makeMeaningQuestion(word: VocabItem, pool: VocabItem[], seed: number): QuizQuestion {
-  const wrongs = shuffle(pool.filter((w) => w.id !== word.id).map((w) => w.meaningKo), seed).slice(0, 3);
+  const wrongs = distractors(word, pool, seed, (w) => w.meaningKo);
   const choices = choiceSet(word.meaningKo, wrongs, seed + 1);
   return {
     id: `q_mean_${word.id}_${seed}`,
@@ -71,7 +116,7 @@ function makeMeaningQuestion(word: VocabItem, pool: VocabItem[], seed: number): 
 }
 
 function makeReadingQuestion(word: VocabItem, pool: VocabItem[], seed: number): QuizQuestion {
-  const wrongs = shuffle(pool.filter((w) => w.id !== word.id).map((w) => w.reading), seed).slice(0, 3);
+  const wrongs = distractors(word, pool, seed, (w) => w.reading);
   const choices = choiceSet(word.reading, wrongs, seed + 2);
   return {
     id: `q_read_${word.id}_${seed}`,
@@ -86,7 +131,7 @@ function makeReadingQuestion(word: VocabItem, pool: VocabItem[], seed: number): 
 
 function makeBlankQuestion(word: VocabItem, pool: VocabItem[], seed: number): QuizQuestion {
   const sentence = word.exampleJa.replace(word.word, "____");
-  const wrongs = shuffle(pool.filter((w) => w.id !== word.id).map((w) => w.word), seed).slice(0, 3);
+  const wrongs = distractors(word, pool, seed, (w) => w.word);
   const choices = choiceSet(word.word, wrongs, seed + 3);
   return {
     id: `q_blank_${word.id}_${seed}`,
@@ -100,7 +145,7 @@ function makeBlankQuestion(word: VocabItem, pool: VocabItem[], seed: number): Qu
 }
 
 function makeTypeMatchQuestion(word: VocabItem, pool: VocabItem[], seed: number): QuizQuestion {
-  const allTypes = uniq(pool.flatMap((w) => w.questionTypes)).filter(Boolean);
+  const allTypes = uniq(pool.flatMap((w) => w.questionTypes).concat(FALLBACK_TYPES)).filter(Boolean);
   const correct = word.questionTypes[0] || "문맥 이해";
   const wrongs = shuffle(allTypes.filter((t) => t !== correct), seed).slice(0, 3);
   const choices = choiceSet(correct, wrongs, seed + 4);
@@ -116,20 +161,26 @@ function makeTypeMatchQuestion(word: VocabItem, pool: VocabItem[], seed: number)
 }
 
 function makeSynonymQuestion(word: VocabItem, pool: VocabItem[], seed: number): QuizQuestion {
-  const correct = (word.synonyms || []).filter(Boolean)[0] || (word.relatedWords[0] || word.meaningKo);
-  const wrongs = shuffle(
-    pool
-      .filter((w) => w.id !== word.id)
-      .map((w) => w.synonyms[0] || w.relatedWords[0] || w.meaningKo),
-    seed
-  ).slice(0, 3);
+  const synonym = (word.synonyms || []).filter(Boolean)[0];
+  const related = (word.relatedWords || []).filter(Boolean)[0];
+  const correct = synonym || related || word.meaningKo;
+  const subPrompt = synonym
+    ? "동의어/유사 표현을 고르세요"
+    : related
+    ? "같은 주제의 관련어를 고르세요"
+    : "뜻을 고르세요";
+  const wrongs = synonym
+    ? distractors(word, pool, seed, (w) => w.synonyms[0] || w.meaningKo)
+    : related
+    ? distractors(word, pool, seed, (w) => w.relatedWords[0] || w.word)
+    : distractors(word, pool, seed, (w) => w.meaningKo);
   const choices = choiceSet(correct, wrongs, seed + 5);
   return {
     id: `q_syn_${word.id}_${seed}`,
     kind: "synonym",
     promptWordId: word.id,
     prompt: word.word,
-    subPrompt: "동의어/유사 표현을 고르세요",
+    subPrompt,
     choices,
     answer: correct,
   };
@@ -165,14 +216,41 @@ function grade(questions: QuizQuestion[], answers: Record<string, string | strin
   return { correctCount, wrongWordIds, weakTypes, weakSubjects, weakLevels, weakQTypes };
 }
 
+function diagnosticComment(accuracy: number, weakTypes: string[], courseTitle: string) {
+  const weak = weakTypes.length ? ` 특히 ${weakTypes.slice(0, 2).join(", ")} 유형을 먼저 복습하면 좋아요.` : "";
+  if (accuracy >= 85) return `${courseTitle} 기준이 꽤 안정적입니다. 이제 헷갈리는 보기까지 빠르게 구분하는 연습으로 올리면 됩니다.${weak}`;
+  if (accuracy >= 65) return `${courseTitle} 핵심 단어는 잡혀 있어요. 비슷한 뜻의 선택지에서 흔들리는 구간을 줄이면 점수가 빨리 오릅니다.${weak}`;
+  if (accuracy >= 40) return `${courseTitle} 기본 단어를 다시 정리할 타이밍입니다. 오늘은 진단 오답 세트를 만들어 짧게 반복해보세요.${weak}`;
+  return `${courseTitle} 기초 단어부터 차근차근 다시 쌓는 편이 좋습니다. 단어장 20개와 빠른 OX로 감을 먼저 만들면 좋아요.${weak}`;
+}
+
+function testTypeOptions(course: LearningCourse): DiagnosticTestType[] {
+  const courseType = getLearningCourseMeta(course).diagnosticType as DiagnosticTestType;
+  if (course === "EJU_JAPANESE") {
+    return [courseType, "독해 유형 진단", "청독해 자료형 진단", "기술문 표현 진단", "목표 점수별 진단", "오답 재진단"];
+  }
+  if (course === "EJU_SOGO") {
+    return [courseType, "종합과목 단어 진단", "목표 점수별 진단", "오답 재진단"];
+  }
+  if (course === "EJU_SCIENCE") {
+    return [courseType, "목표 점수별 진단", "오답 재진단"];
+  }
+  if (course === "TOEIC_BUSINESS") {
+    return [courseType, "전체 진단", "오답 재진단"];
+  }
+  return [courseType, "전체 진단", "오답 재진단"];
+}
+
 export function DiagnosticScreen({
   vocab,
+  learningCourse,
   onBack,
   onComplete,
   onCreateWeakSet,
   latestResult,
 }: {
   vocab: VocabItem[];
+  learningCourse: LearningCourse;
   onBack: () => void;
   onComplete: (result: DiagnosticResult, wrongWordIds: string[]) => void;
   onCreateWeakSet: (weakTypes: string[], wordIds: string[]) => void;
@@ -180,16 +258,51 @@ export function DiagnosticScreen({
 }) {
   const { t, tm } = useI18n();
   const [phase, setPhase] = useState<"setup" | "run" | "result">("setup");
-  const [testType, setTestType] = useState<DiagnosticTestType>("전체 진단");
+  const [selectedCourse, setSelectedCourse] = useState<LearningCourse>(learningCourse);
+  const [testType, setTestType] = useState<DiagnosticTestType>(getLearningCourseMeta(learningCourse).diagnosticType as DiagnosticTestType);
   const [count, setCount] = useState<10 | 20 | 30>(10);
   const [questions, setQuestions] = useState<QuizQuestion[]>([]);
   const [idx, setIdx] = useState(0);
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({});
+  const [result, setResult] = useState<DiagnosticResult | null>(null);
 
-  const pool = useMemo(() => (vocab.length >= 60 ? vocab : vocab.concat(vocab).concat(vocab)), [vocab]);
+  const courseMeta = getLearningCourseMeta(selectedCourse);
+  const testOptions = testTypeOptions(selectedCourse);
+  const courseVocab = useMemo(
+    () => vocab.filter((item) => wordMatchesLearningCourse(item, selectedCourse)),
+    [selectedCourse, vocab]
+  );
+
+  const filteredVocab = useMemo(() => {
+    const base = courseVocab.length ? courseVocab : vocab.filter((item) => wordMatchesLearningCourse(item, "EJU_JAPANESE"));
+    let next = base;
+    if (testType === "독해 유형 진단") {
+      next = base.filter((item) => item.subject === "일본어" || item.questionTypes.some((type) => ["문맥 이해", "어휘 추론", "근거 찾기", "주장 파악"].includes(type)));
+    } else if (testType === "청독해 자료형 진단") {
+      next = base.filter((item) => item.subject === "청독해" || item.questionTypes.some((type) => ["자료형", "그래프 해석", "정보 선택"].includes(type)));
+    } else if (testType === "기술문 표현 진단") {
+      next = base.filter((item) => item.subject === "기술문" || item.level === "기술문 표현");
+    } else if (testType === "EJU 이과 진단") {
+      next = base.filter((item) => wordMatchesLearningCourse(item, "EJU_SCIENCE"));
+    } else if (testType === "종합과목 단어 진단" || testType === "EJU 문과 진단" || testType === "EJU 종합과목 진단") {
+      next = base.filter((item) => item.subject === "종합과목");
+    } else if (testType === "TOEIC 어휘 진단") {
+      next = base.filter((item) => item.subject === "영어" && item.questionTypes.includes("TOEIC"));
+    } else if (testType === "오답 재진단") {
+      next = base.filter((item) => item.cumulativeWrongAttempts > 0 || item.recentWrongAttempts7d > 0);
+    }
+    if (testType === "오답 재진단") return next;
+    return next.length >= 4 ? next : base;
+  }, [courseVocab, testType, vocab]);
+
+  const pool = useMemo(
+    () => (filteredVocab.length >= 60 ? filteredVocab : filteredVocab.concat(filteredVocab).concat(filteredVocab)),
+    [filteredVocab]
+  );
 
   const buildQuestions = (seed: number) => {
-    const pickPool = shuffle(pool, seed).slice(0, count);
+    const uniquePool = uniq(pool);
+    const pickPool = shuffle(uniquePool, seed).slice(0, Math.min(count, uniquePool.length));
     const q: QuizQuestion[] = [];
     for (let i = 0; i < pickPool.length; i++) {
       const w = pickPool[i];
@@ -212,11 +325,19 @@ export function DiagnosticScreen({
   }
 
   function start() {
+    if (!filteredVocab.length) {
+      Alert.alert(
+        t("진단"),
+        t(testType === "오답 재진단" ? "아직 실제 오답 기록이 없습니다." : "이 학습 코스에는 아직 진단할 단어가 없습니다.")
+      );
+      return;
+    }
     const seed = 20000 + Date.now() % 10000;
     const q = buildQuestions(seed);
     setQuestions(q);
     setAnswers({});
     setIdx(0);
+    setResult(null);
     setPhase("run");
   }
 
@@ -262,6 +383,8 @@ export function DiagnosticScreen({
         questionCount: questions.length,
         correctCount,
         accuracy,
+        comment: diagnosticComment(accuracy, weakTypes, courseMeta.title),
+        learningCourse: selectedCourse,
         weakSubjects: weakSubjects.map((k) => ({ key: (k.split(" / ")[0] as any) || "일본어", wrong: 1 })),
         weakQuestionTypes: weakTypes.map((k) => ({ key: k, wrong: 1 })),
         weakLevels: weakLevels.map((k) => ({ key: k as any, wrong: 1 })),
@@ -271,6 +394,7 @@ export function DiagnosticScreen({
       };
 
       onComplete(res, graded.wrongWordIds);
+      setResult(res);
       setPhase("result");
       return;
     }
@@ -288,26 +412,40 @@ export function DiagnosticScreen({
   const isCorrect = current && answered ? answered === (current as any).answer : null;
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll}>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll} stickyHeaderIndices={[0]}>
       <TopBack title={t("단어 진단 테스트")} onBack={phase === "setup" ? onBack : resetToSetup} />
 
       {phase === "setup" ? (
         <>
           <Card style={{ marginTop: 12 }}>
+            <Text style={styles.hero}>{t("학습 카탈로그")}</Text>
+            <Text style={styles.muted}>{t("코스를 먼저 고르면 해당 언어와 시험 범위 안에서만 진단합니다.")}</Text>
+            <View style={styles.courseGrid}>
+              {LEARNING_COURSES.map((course) => {
+                const selected = selectedCourse === course.id;
+                return (
+                  <Pressable
+                    key={course.id}
+                    onPress={() => {
+                      setSelectedCourse(course.id);
+                      setTestType(getLearningCourseMeta(course.id).diagnosticType as DiagnosticTestType);
+                    }}
+                    style={({ pressed }) => [styles.courseCard, selected && styles.courseCardOn, pressed && { opacity: 0.9 }]}
+                  >
+                    <Text style={styles.courseTitle}>{t(course.title)}</Text>
+                    <Text style={styles.courseSubtitle}>{t(course.subtitle)}</Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </Card>
+
+          <Card style={{ marginTop: 12 }}>
             <Text style={styles.hero}>{t("진단 유형")}</Text>
-            <Text style={styles.muted}>{t("시험이 아니라 “단어 약점 진단”입니다. (기출 메타데이터 기반)")}</Text>
+            <Text style={styles.muted}>{t(courseMeta.description)}</Text>
+            <Text style={styles.muted}>{t("현재 후보 단어")} {filteredVocab.length}{t("개")} · {t("비슷한 보기끼리 섞어 난이도를 올렸습니다.")}</Text>
             <View style={{ marginTop: 12, gap: 8 }}>
-              {(
-                [
-                  "전체 진단",
-                  "목표 점수별 진단",
-                  "독해 유형 진단",
-                  "청독해 자료형 진단",
-                  "기술문 표현 진단",
-                  "종합과목 단어 진단",
-                  "오답 재진단",
-                ] as DiagnosticTestType[]
-              ).map((typeLabel) => (
+              {testOptions.map((typeLabel) => (
                 <Pressable
                   key={typeLabel}
                   onPress={() => setTestType(typeLabel)}
@@ -413,15 +551,45 @@ export function DiagnosticScreen({
       {phase === "result" ? (
         <Card style={{ marginTop: 12 }}>
           <Text style={styles.hero}>{t("진단 완료")}</Text>
-          <Text style={styles.muted}>{t("결과는 화면 상단 “최근 진단”에 저장됩니다.")}</Text>
+          {result ? (
+            <>
+              <Text style={styles.resultScore}>{result.accuracy}%</Text>
+              <Text style={styles.muted}>
+                {result.correctCount}/{result.questionCount} · {t(result.testType)}
+              </Text>
+              <Text style={styles.commentText}>{t(result.comment)}</Text>
+              {result.weakTypes.length ? (
+                <Row style={{ marginTop: 12, flexWrap: "wrap" }}>
+                  {result.weakTypes.map((type) => (
+                    <Badge key={type} label={type} tone="violet" />
+                  ))}
+                </Row>
+              ) : null}
+            </>
+          ) : (
+            <Text style={styles.muted}>{t("결과는 최근 진단에 저장됩니다.")}</Text>
+          )}
           <Row style={{ marginTop: 12 }}>
-            <Pressable style={[styles.secondaryBtn, { flex: 1 }]} onPress={() => setPhase("setup")}>
-              <Text style={styles.secondaryBtnText}>{t("다시 진단")}</Text>
-            </Pressable>
             <Pressable
               style={[styles.secondaryBtn, { flex: 1 }]}
               onPress={() => {
-                Alert.alert(t("안내"), t("진단 결과 화면은 App에서 리포트로도 확인할 수 있습니다."));
+                if (!result?.mostMissedWordIds.length) {
+                  Alert.alert(t("약점 세트"), t("이번 진단에서 새로 만들 오답 세트가 없습니다."));
+                  return;
+                }
+                onCreateWeakSet(result.weakTypes.length ? result.weakTypes : [result.testType], result.mostMissedWordIds);
+              }}
+            >
+              <Text style={styles.secondaryBtnText}>{t("오답 세트 만들기")}</Text>
+            </Pressable>
+            <Pressable style={[styles.secondaryBtn, { flex: 1 }]} onPress={() => setPhase("setup")}>
+              <Text style={styles.secondaryBtnText}>{t("다시 진단")}</Text>
+            </Pressable>
+          </Row>
+          <Row style={{ marginTop: 10 }}>
+            <Pressable
+              style={[styles.secondaryBtn, { flex: 1 }]}
+              onPress={() => {
                 onBack();
               }}
             >
@@ -439,11 +607,17 @@ export function DiagnosticScreen({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.bg, paddingHorizontal: 20 },
   scroll: { paddingTop: 18, paddingBottom: 115 },
+  stickyHeader: { backgroundColor: COLORS.bg, paddingBottom: 10, zIndex: 10 },
   backBtn: { height: 48, minWidth: 82, paddingHorizontal: 12, borderRadius: 24, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.line, justifyContent: "center" },
   backText: { color: COLORS.text, fontWeight: "800" },
   topTitle: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h3, textAlign: "center", flex: 1 },
   hero: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h2 },
   muted: { color: COLORS.muted, lineHeight: TYPO.smallLine, fontSize: TYPO.small, marginTop: 6 },
+  courseGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 12 },
+  courseCard: { width: "48%", minHeight: 92, borderRadius: 14, padding: 12, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.card2 },
+  courseCardOn: { borderColor: COLORS.blue, backgroundColor: "#10143C" },
+  courseTitle: { color: COLORS.text, fontWeight: "900", fontSize: TYPO.body },
+  courseSubtitle: { color: COLORS.muted, fontWeight: "700", fontSize: TYPO.small, lineHeight: TYPO.smallLine, marginTop: 6 },
   itemTitle: { color: COLORS.text, fontWeight: "800" },
   prompt: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h2, marginTop: 14 },
   choice: { borderRadius: 14, padding: 14, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.card2 },
@@ -455,6 +629,8 @@ const styles = StyleSheet.create({
   choiceText: { color: COLORS.text, fontWeight: "800" },
   feedback: { marginTop: 12, backgroundColor: "#10143C" },
   feedbackTitle: { color: COLORS.gold, fontWeight: "800", fontSize: TYPO.h3 },
+  resultScore: { color: COLORS.text, fontWeight: "900", fontSize: 42, marginTop: 8 },
+  commentText: { color: "#DDE3FF", fontWeight: "800", lineHeight: TYPO.bodyLine, marginTop: 12 },
   primaryBtn: { backgroundColor: COLORS.blue, borderRadius: 16, minHeight: 54, justifyContent: "center", alignItems: "center", marginTop: 12 },
   primaryBtnText: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h3 },
   secondaryBtn: { backgroundColor: COLORS.card2, borderRadius: 14, minHeight: 52, justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: COLORS.line },

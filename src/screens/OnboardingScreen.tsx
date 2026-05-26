@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from "react";
 import {
   ActivityIndicator,
+  Alert,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -14,6 +15,8 @@ import {
 import { Badge, Card, Row } from "../components/common";
 import { COLORS, RADII, SPACING, TYPO } from "../theme";
 import { SupabaseProfile, UserGoal, UserRole } from "../types";
+import { getSafeErrorMessage, logInternalError } from "../utils/errors";
+import { sanitizeText, validateRequiredText, validateUserProfile } from "../utils/validation";
 
 type OnboardingStep = 0 | 1 | 2 | 3;
 
@@ -31,7 +34,12 @@ const stepTitles = ["이름", "역할", "학습 과목/시험", "현재 수준"]
 const goalOptions: Array<{ value: UserGoal; label: string; body: string }> = [
   { value: "EJU", label: "EJU", body: "일본 유학시험 과목·기출 단어" },
   { value: "JLPT", label: "JLPT", body: "급수별 일본어 어휘" },
-  { value: "TOEIC", label: "TOEIC", body: "영어 시험 어휘" },
+  { value: "TOEIC", label: "TOEIC", body: "입시·취업 영어 시험 어휘" },
+  { value: "TOEFL", label: "TOEFL", body: "대학 수업형 아카데믹 영어" },
+  { value: "IELTS", label: "IELTS", body: "아카데믹 영어·스피킹 대비" },
+  { value: "BusinessEnglish", label: "스타트업 영어", body: "PMF, 투자, 회의, 제안 표현" },
+  { value: "BusinessJapanese", label: "비즈니스 일본어", body: "메일, 회의, 일정 조율 표현" },
+  { value: "CampusJapanese", label: "대학생 일본어", body: "JLPT 밖 실사용 표현·신조어" },
   { value: "other", label: "기타", body: "직접 과목이나 시험을 입력" },
 ];
 
@@ -39,6 +47,11 @@ const levelOptionsByGoal: Record<UserGoal, string[]> = {
   EJU: ["처음 준비", "200점 목표", "300점 목표", "350+ 목표", "일본어 약함", "종합과목 약함", "직접 입력"],
   JLPT: ["N5", "N4", "N3", "N2", "N1", "급수 미정", "직접 입력"],
   TOEIC: ["입문", "500점대", "600점대", "700점대", "800점대", "900점 이상", "직접 입력"],
+  TOEFL: ["처음 준비", "60점 목표", "80점 목표", "90점 이상", "Reading 약함", "Speaking 약함", "직접 입력"],
+  IELTS: ["처음 준비", "5.5 목표", "6.0 목표", "6.5 목표", "7.0 이상", "Speaking 약함", "직접 입력"],
+  BusinessEnglish: ["입문", "회의 표현", "메일 표현", "피치·투자", "스타트업 실무", "직접 입력"],
+  BusinessJapanese: ["입문", "메일 표현", "회의 표현", "면접·인턴", "회사 실무", "직접 입력"],
+  CampusJapanese: ["입문", "캠퍼스 회화", "신조어 이해", "SNS 표현", "친구 대화", "직접 입력"],
   other: ["직접 입력"],
 };
 
@@ -46,6 +59,11 @@ const levelLabelByGoal: Record<UserGoal, string> = {
   EJU: "현재 준비 수준을 골라주세요",
   JLPT: "현재 급수를 골라주세요",
   TOEIC: "현재 점수대를 골라주세요",
+  TOEFL: "현재 목표 점수와 약점을 골라주세요",
+  IELTS: "현재 목표 밴드와 약점을 골라주세요",
+  BusinessEnglish: "배우고 싶은 실무 영어 영역을 골라주세요",
+  BusinessJapanese: "배우고 싶은 비즈니스 일본어 영역을 골라주세요",
+  CampusJapanese: "배우고 싶은 실사용 일본어 영역을 골라주세요",
   other: "현재 수준을 입력해 주세요",
 };
 
@@ -91,8 +109,9 @@ export function OnboardingScreen({
 
   const nameError = useMemo(() => {
     if (!touched && step !== 0) return "";
-    if (!draft.name.trim()) return "이름을 입력해 주세요.";
-    if (draft.name.trim().length < 2) return "이름은 2자 이상 입력해 주세요.";
+    const validation = validateRequiredText(draft.name, 40, "한국어", "이름을 입력해 주세요.");
+    if (!validation.ok) return validation.message;
+    if (validation.value.length < 2) return "이름은 2자 이상 입력해 주세요.";
     return "";
   }, [draft.name, step, touched]);
 
@@ -128,17 +147,38 @@ export function OnboardingScreen({
   async function submit() {
     setTouched(true);
     if (!canSubmit) return;
+    const normalizedLevel =
+      draft.goal === "other"
+        ? `${sanitizeText(selectedSubjectLabel, 40)} · ${sanitizeText(selectedLevelLabel, 80)}`
+        : sanitizeText(selectedLevelLabel, 120);
+    const profileValidation = validateUserProfile({ name: draft.name, current_level: normalizedLevel }, "한국어");
+    if (!profileValidation.ok) return;
 
     await onSubmit({
       user_id: userId,
-      name: draft.name.trim(),
+      name: profileValidation.value.name,
       role: draft.role,
       goal: draft.goal,
-      current_level:
-        draft.goal === "other"
-          ? `${selectedSubjectLabel} · ${selectedLevelLabel}`
-          : selectedLevelLabel,
+      current_level: profileValidation.value.current_level,
     });
+  }
+
+  function confirmSignOut() {
+    Alert.alert("저장하지 않고 로그아웃할까요?", "입력 중인 프로필 설정은 저장되지 않습니다.", [
+      { text: "취소", style: "cancel" },
+      {
+        text: "로그아웃",
+        style: "destructive",
+        onPress: async () => {
+          try {
+            await onSignOut();
+          } catch (error) {
+            logInternalError(error, "Onboarding.signOut");
+            Alert.alert("로그아웃", getSafeErrorMessage(error, "한국어"));
+          }
+        },
+      },
+    ]);
   }
 
   const primaryLabel = step < 3 ? "다음" : "VocaRush 시작하기";
@@ -152,7 +192,7 @@ export function OnboardingScreen({
               <Text style={styles.logo}>VocaRush</Text>
               <Text style={styles.subtitle}>처음 한 번만 설정하면 바로 학습을 시작할 수 있어요.</Text>
             </View>
-            <Pressable onPress={onSignOut} disabled={saving} style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.85 }]}>
+            <Pressable onPress={confirmSignOut} disabled={saving} style={({ pressed }) => [styles.linkBtn, pressed && { opacity: 0.85 }]} accessibilityRole="button" accessibilityLabel="로그아웃">
               <Text style={styles.linkText}>로그아웃</Text>
             </Pressable>
           </Row>
@@ -194,6 +234,7 @@ export function OnboardingScreen({
               <TextInput
                 value={draft.name}
                 onChangeText={(name) => setDraft((prev) => ({ ...prev, name }))}
+                maxLength={40}
                 onBlur={() => setTouched(true)}
                 placeholder="예: Joon"
                 placeholderTextColor={COLORS.dim}
@@ -217,6 +258,9 @@ export function OnboardingScreen({
                     key={role}
                     onPress={() => setDraft((prev) => ({ ...prev, role }))}
                     disabled={saving}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: draft.role === role }}
+                    accessibilityLabel={label}
                     style={({ pressed }) => [
                       styles.optionCard,
                       draft.role === role && styles.optionCardActive,
@@ -247,6 +291,9 @@ export function OnboardingScreen({
                       }))
                     }
                     disabled={saving}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: draft.goal === goal.value }}
+                    accessibilityLabel={goal.label}
                     style={({ pressed }) => [
                       styles.gridItem,
                       draft.goal === goal.value && styles.gridItemActive,
@@ -265,6 +312,7 @@ export function OnboardingScreen({
                   <TextInput
                     value={draft.customSubject}
                     onChangeText={(customSubject) => setDraft((prev) => ({ ...prev, customSubject }))}
+                    maxLength={40}
                     placeholder="예: JPT, 일본어 회화, 중국어, 학교 내신"
                     placeholderTextColor={COLORS.dim}
                     editable={!saving}
@@ -287,6 +335,9 @@ export function OnboardingScreen({
                     key={level}
                     onPress={() => setDraft((prev) => ({ ...prev, current_level: level }))}
                     disabled={saving}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: draft.current_level === level }}
+                    accessibilityLabel={level}
                     style={({ pressed }) => [
                       styles.chip,
                       draft.current_level === level && styles.chipActive,
@@ -303,6 +354,7 @@ export function OnboardingScreen({
                   <TextInput
                     value={draft.customLevel}
                     onChangeText={(customLevel) => setDraft((prev) => ({ ...prev, customLevel }))}
+                    maxLength={120}
                     placeholder={
                       draft.goal === "EJU"
                         ? "예: 종합과목은 약하고 일본어는 300점 목표"
@@ -310,6 +362,16 @@ export function OnboardingScreen({
                           ? "예: N2 공부 중, 한자는 약함"
                           : draft.goal === "TOEIC"
                             ? "예: 700점대 목표, LC 약함"
+                            : draft.goal === "TOEFL"
+                              ? "예: 80점 목표, Speaking Task 약함"
+                              : draft.goal === "IELTS"
+                                ? "예: 6.5 목표, Writing Task 2 약함"
+                                : draft.goal === "BusinessEnglish"
+                                  ? "예: 투자 미팅 표현과 SaaS 지표를 배우고 싶음"
+                                  : draft.goal === "BusinessJapanese"
+                                    ? "예: 인턴 면접과 메일 표현부터"
+                                    : draft.goal === "CampusJapanese"
+                                      ? "예: 대학 친구들이 쓰는 표현부터"
                             : "예: 입문, 중급, 시험 2개월 전"
                     }
                     placeholderTextColor={COLORS.dim}
@@ -370,7 +432,7 @@ const styles = StyleSheet.create({
   topRow: { justifyContent: "space-between", alignItems: "center" },
   logo: { color: COLORS.text, fontSize: TYPO.logo, fontWeight: "900" },
   subtitle: { color: COLORS.muted, fontSize: TYPO.small, lineHeight: TYPO.smallLine, marginTop: 4 },
-  linkBtn: { minHeight: 42, borderRadius: 999, paddingHorizontal: 14, justifyContent: "center", backgroundColor: COLORS.card2, borderWidth: 1, borderColor: COLORS.lineSoft },
+  linkBtn: { minHeight: 44, borderRadius: 999, paddingHorizontal: 14, justifyContent: "center", backgroundColor: COLORS.card2, borderWidth: 1, borderColor: COLORS.lineSoft },
   linkText: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.small },
   progressWrap: { flexDirection: "row", gap: 8, marginTop: 22 },
   progressItem: { flex: 1 },
@@ -395,7 +457,7 @@ const styles = StyleSheet.create({
   gridItem: { width: "48%", minHeight: 92, borderRadius: RADII.card, borderWidth: 1, borderColor: COLORS.lineSoft, backgroundColor: COLORS.card, padding: 14 },
   gridItemActive: { borderColor: COLORS.violet, backgroundColor: "#24225A" },
   chipWrap: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  chip: { minHeight: 42, borderRadius: 999, borderWidth: 1, borderColor: COLORS.lineSoft, backgroundColor: COLORS.card2, paddingHorizontal: 13, justifyContent: "center" },
+  chip: { minHeight: 44, borderRadius: 999, borderWidth: 1, borderColor: COLORS.lineSoft, backgroundColor: COLORS.card2, paddingHorizontal: 13, justifyContent: "center" },
   chipActive: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },
   chipText: { color: COLORS.muted, fontWeight: "800" },
   chipTextActive: { color: COLORS.text },

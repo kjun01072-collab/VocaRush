@@ -1,0 +1,12 @@
+node_modules/
+dist-web/
+.expo/
+.expo-export-check/
+.git/
+.codex/
+*.log
+tmp_*/
+tmp_*.png
+tmp_*.jpg
+tmp_*.jpeg
+tmp_*.webp

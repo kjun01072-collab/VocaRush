@@ -8,7 +8,7 @@ import { StudentProfile, VocabularyAssignment } from "../types";
 function TopBack({ title, onBack }: { title: string; onBack: () => void }) {
   const { t } = useI18n();
   return (
-    <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
+    <Row style={[styles.stickyHeader, { justifyContent: "space-between", alignItems: "center" }]}>
       <Pressable onPress={onBack} style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.9 }]}>
         <Text style={styles.backText}>‹ {t("뒤로")}</Text>
       </Pressable>
@@ -42,7 +42,7 @@ export function TeacherStudentDetailScreen({
   }, [classAssignments, student.id]);
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll}>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll} stickyHeaderIndices={[0]}>
       <TopBack title={t("학생")} onBack={onBack} />
 
       <Card style={{ marginTop: 12 }}>
@@ -112,6 +112,7 @@ export function TeacherStudentDetailScreen({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.bg, paddingHorizontal: 20 },
   scroll: { paddingTop: 18, paddingBottom: 115 },
+  stickyHeader: { backgroundColor: COLORS.bg, paddingBottom: 10, zIndex: 10 },
   backBtn: { height: 48, minWidth: 82, paddingHorizontal: 12, borderRadius: 24, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.line, justifyContent: "center" },
   backText: { color: COLORS.text, fontWeight: "800" },
   topTitle: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h3, textAlign: "center", flex: 1 },

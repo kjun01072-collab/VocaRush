@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { ActivityIndicator, Alert, Modal, Platform, Pressable, SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput, View } from "react-native";
 
@@ -11,31 +11,46 @@ import {
 } from "./src/data/vocabData";
 import { I18nProvider, useI18n } from "./src/i18n";
 import { AuthProvider, useAuth } from "./src/auth/AuthProvider";
-import { COLORS, RADII, SPACING, TYPO } from "./src/theme";
+import { COLORS, PRESS_FEEDBACK, RADII, SPACING, TYPO } from "./src/theme";
+import { Card, Row } from "./src/components/common";
 import {
+  AttendanceState,
+  AppOverlayScreen,
   DiagnosticResult,
   LearningRecord,
   LearnMode,
+  LearnSessionProgress,
+  LearningCourse,
   StudentSettings,
   StudentTab,
+  StudySessionLog,
   SupabaseProfile,
   RewardItem,
   StudySet,
   TeacherTab,
+  UserRole,
   UserStudyFolder,
   VocabItem,
   VocabularyAssignment,
   WeakTypeStat,
 } from "./src/types";
+import { courseFromProfile, getLearningCourseMeta, wordMatchesLearningCourse } from "./src/data/learningCatalog";
 import { fetchProfile, profileErrorMessage, saveProfile } from "./src/lib/profiles";
 import { fetchLearningRecords, insertLearningRecord, learningRecordErrorMessage } from "./src/lib/learningRecords";
 import { extractHighlightWordsFromFile } from "./src/lib/highlightExtraction";
+import { loadLocalAppState, saveLocalAppState } from "./src/lib/localAppState";
+import { getSafeErrorMessage, logInternalError } from "./src/utils/errors";
+import { canModifyRecord } from "./src/utils/permissions";
+import { sanitizeText, validateBulkScheduleImportText, validateRequiredText } from "./src/utils/validation";
+import { StudySetRowInput } from "./src/utils/studySetRows";
+import { getAssignmentAvailability } from "./src/utils/assignmentAvailability";
 
 import { StudentHomeScreen } from "./src/screens/StudentHomeScreen";
 import { VocabularyScreen } from "./src/screens/VocabularyScreen";
 import { LearnScreen } from "./src/screens/LearnScreen";
 import { WordDetailScreen } from "./src/screens/WordDetailScreen";
 import { SetDetailScreen } from "./src/screens/SetDetailScreen";
+import { UserFolderDetailScreen } from "./src/screens/UserFolderDetailScreen";
 import { HighlightModal } from "./src/screens/HighlightModal";
 import { DiagnosticScreen } from "./src/screens/DiagnosticScreen";
 import { ReportScreen } from "./src/screens/ReportScreen";
@@ -54,6 +69,116 @@ import { OnboardingScreen } from "./src/screens/OnboardingScreen";
 
 const initialVocab = generateVocabData();
 const initialSets = buildInitialStudySets(initialVocab);
+const STUDENT_TABS: StudentTab[] = ["home", "vocab", "library", "my"];
+const TEACHER_TABS: TeacherTab[] = ["home", "classes", "distribute", "status", "my"];
+const LOCAL_LEARNING_RECORD_PREFIX = "local_learning_";
+const SELF_ASSESSMENT_ERROR_TYPES = new Set(["낱말카드", "카드 분류", "학습 중"]);
+const LEARN_MODES: LearnMode[] = [
+  "낱말카드",
+  "한자→한국어",
+  "뜻→한자",
+  "뜻→독음",
+  "뜻 맞히기",
+  "독음 맞히기",
+  "예문 빈칸",
+  "동의어 연결",
+  "관련어 묶음 퀴즈",
+  "유형별 퀴즈",
+  "빠른 OX",
+  "쓰기 연습",
+  "카드 분류",
+  "오답 복습",
+];
+
+function learnSessionKey(title: string, wordIds: string[]) {
+  return `${title.trim()}::${wordIds.join("|")}`;
+}
+
+function learnProgressKey(sessionKey: string, mode: LearnMode) {
+  return `${sessionKey}::${mode}`;
+}
+
+function reviewDerivedSetId(setId?: string) {
+  return Boolean(setId && (setId.startsWith("set_wrong") || setId.startsWith("set_learning")));
+}
+
+function learningCardBucketKey(sourceSetId: string | undefined, sourceTitle: string | undefined) {
+  if (sourceSetId && !reviewDerivedSetId(sourceSetId)) return sourceSetId;
+  return `session:${(sourceTitle || "학습 중 낱말카드").trim()}`;
+}
+
+function dynamicSetId(prefix: string, key: string) {
+  return `${prefix}_${key.replace(/[^A-Za-z0-9가-힣_-]+/g, "_").slice(0, 80)}`;
+}
+
+function mergeSavedVocab(saved: VocabItem[] | undefined, options?: { resetFavorites?: boolean }): VocabItem[] | undefined {
+  if (!saved?.length) return saved;
+  const savedById = new Map(saved.map((item) => [item.id, item] as const));
+  const builtinIds = new Set(initialVocab.map((item) => item.id));
+  const customItems = saved
+    .filter((item) => !builtinIds.has(item.id))
+    .map((item) => (options?.resetFavorites ? { ...item, isFavorite: false } : item));
+  const mergedBuiltins = initialVocab.map((item) => {
+    const previous = savedById.get(item.id);
+    if (!previous) return item;
+    return {
+      ...item,
+      userId: previous.userId,
+      ownerId: previous.ownerId,
+      reviewStatus: previous.reviewStatus,
+      wrongCount: previous.wrongCount,
+      cumulativeWrongAttempts: previous.cumulativeWrongAttempts,
+      recentWrongAttempts7d: previous.recentWrongAttempts7d,
+      masteryLevel: previous.masteryLevel,
+      isFavorite: options?.resetFavorites ? false : previous.isFavorite,
+    };
+  });
+  return [...customItems, ...mergedBuiltins];
+}
+
+function mergeSavedStudySets(saved: StudySet[] | undefined): StudySet[] | undefined {
+  if (!saved?.length) return saved;
+  const savedById = new Map(saved.map((set) => [set.id, set] as const));
+  const builtinIds = new Set(initialSets.map((set) => set.id));
+  const customSets = saved.filter((set) => !builtinIds.has(set.id));
+  const mergedBuiltins = initialSets.map((set) => {
+    const previous = savedById.get(set.id);
+    if (!previous) return set;
+    return {
+      ...set,
+      progress: previous.progress,
+      createdAt: previous.createdAt,
+    };
+  });
+  return [...mergedBuiltins, ...customSets];
+}
+
+function compactVocabForStorage(vocab: VocabItem[]) {
+  const initialById = new Map(initialVocab.map((item) => [item.id, item] as const));
+  return vocab.filter((item) => {
+    const original = initialById.get(item.id);
+    if (!original) return true;
+    return (
+      item.userId !== original.userId ||
+      item.ownerId !== original.ownerId ||
+      item.reviewStatus !== original.reviewStatus ||
+      item.wrongCount !== original.wrongCount ||
+      item.cumulativeWrongAttempts !== original.cumulativeWrongAttempts ||
+      item.recentWrongAttempts7d !== original.recentWrongAttempts7d ||
+      item.masteryLevel !== original.masteryLevel ||
+      item.isFavorite !== original.isFavorite
+    );
+  });
+}
+
+function compactStudySetsForStorage(sets: StudySet[]) {
+  const initialById = new Map(initialSets.map((set) => [set.id, set] as const));
+  return sets.filter((set) => {
+    const original = initialById.get(set.id);
+    if (!original) return true;
+    return set.progress !== original.progress || set.createdAt !== original.createdAt;
+  });
+}
 
 const rewardStoreItems: RewardItem[] = [
   {
@@ -95,6 +220,41 @@ function dayKeyLocal(d: Date) {
   const m = String(d.getMonth() + 1).padStart(2, "0");
   const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
+}
+
+function addDaysToKey(dayKey: string, delta: number) {
+  const [y, m, d] = dayKey.split("-").map(Number);
+  const date = new Date(y, (m || 1) - 1, d || 1);
+  date.setDate(date.getDate() + delta);
+  return dayKeyLocal(date);
+}
+
+const INITIAL_ATTENDANCE: AttendanceState = {
+  checkedDates: [],
+  currentStreak: 0,
+  longestStreak: 0,
+  lastStudyDate: null,
+};
+
+function markAttendanceDay(prev: AttendanceState, todayKey: string): AttendanceState {
+  if (prev.checkedDates.includes(todayKey)) return prev;
+  const checkedDates = uniq(prev.checkedDates.concat(todayKey)).sort();
+  const yesterdayKey = addDaysToKey(todayKey, -1);
+  const currentStreak = prev.lastStudyDate === yesterdayKey ? prev.currentStreak + 1 : 1;
+  return {
+    checkedDates,
+    currentStreak,
+    longestStreak: Math.max(prev.longestStreak, currentStreak),
+    lastStudyDate: todayKey,
+  };
+}
+
+function defaultEjuExamPlans(targetScore: StudentSettings["targetScore"]) {
+  const firstTargetScoreValue = targetScore === "350+" ? 350 : targetScore === "300점" ? 300 : 200;
+  return [
+    { examDate: "2026.06 EJU", targetScore, targetScoreValue: firstTargetScoreValue },
+    { examDate: "2026.11 EJU", targetScore: "350+" as const, targetScoreValue: 350 },
+  ];
 }
 
 function uniq<T>(arr: T[]) {
@@ -296,9 +456,15 @@ function hasJapaneseText(text: string) {
   return /[\u3040-\u30ff\u3400-\u9fff]/.test(text);
 }
 
+function hasLatinText(text: string) {
+  return /[A-Za-z]/.test(text);
+}
+
 function canAutoSaveCuriosityWord(raw: string) {
   const term = raw.trim();
-  return term.length > 0 && term.length <= 18 && hasJapaneseText(term) && !/[。、！？\n\r]/.test(term);
+  if (!term || /[。、！？\n\r]/.test(term)) return false;
+  if (hasJapaneseText(term)) return term.length <= 18;
+  return hasLatinText(term) && term.length <= 48 && /^[A-Za-z0-9][A-Za-z0-9 .+/#&'()-]*$/.test(term);
 }
 
 function curiosityIdFor(term: string) {
@@ -311,14 +477,19 @@ function fallbackReading(term: string) {
 }
 
 function buildCuriosityWord(term: string): VocabItem {
+  const isEnglishTerm = hasLatinText(term) && !hasJapaneseText(term);
   const template = CURIOSITY_WORD_BANK[term] || {
-    reading: fallbackReading(term),
+    reading: isEnglishTerm ? term : fallbackReading(term),
     meaningKo: "뜻 확인 필요",
     synonyms: ["직접 확인"],
-    relatedWords: ["개인 검색", "궁금한 일본어"],
-    exampleJa: `${term}の意味を辞書で確認して、自分の例文を追加しましょう。`,
-    exampleKo: `${term}의 뜻을 사전에서 확인하고 나만의 예문을 추가해 보세요.`,
-    explanationKo: "검색으로 저장한 개인 단어입니다. 정확한 뜻과 독음은 사전 확인 후 수정하는 것을 권장합니다.",
+    relatedWords: ["개인 검색", isEnglishTerm ? "영어 전문 용어" : "궁금한 표현"],
+    exampleJa: isEnglishTerm
+      ? `${term}: add a real sentence from your work or class context.`
+      : `${term}の意味を辞書で確認して、自分の例文を追加しましょう。`,
+    exampleKo: `${term}의 뜻을 확인하고 나만의 예문을 추가해 보세요.`,
+    explanationKo: isEnglishTerm
+      ? "검색으로 저장한 영어 전문 용어입니다. 정확한 뜻과 실제 업무 문장은 단어 상세에서 보강해 주세요."
+      : "검색으로 저장한 개인 단어입니다. 정확한 뜻과 독음은 사전 확인 후 수정하는 것을 권장합니다.",
   };
 
   return {
@@ -327,9 +498,9 @@ function buildCuriosityWord(term: string): VocabItem {
     reading: template.reading,
     meaningKo: template.meaningKo,
     level: template.level || "필수 기초",
-    subject: "일본어",
-    part: "궁금한 일본어",
-    questionTypes: ["개인 검색"],
+    subject: isEnglishTerm ? "영어" : "일본어",
+    part: isEnglishTerm ? "궁금한 전문 영어" : "궁금한 표현",
+    questionTypes: isEnglishTerm ? ["개인 검색", "전문 용어", "비즈니스 영어"] : ["개인 검색"],
     occurrenceCount: 0,
     frequencyScore: 8,
     difficulty: template.difficulty || 1,
@@ -377,20 +548,6 @@ function lookupDictionaryWord(rawQuery: string) {
   if (canAutoSaveCuriosityWord(query)) return buildCuriosityWord(query);
   return null;
 }
-
-type OverlayScreen =
-  | { kind: "none" }
-  | { kind: "word"; wordId: string }
-  | { kind: "set"; setId: string }
-  | { kind: "learn"; title: string; mode: LearnMode; wordIds: string[] }
-  | { kind: "diagnostic" }
-  | { kind: "report" }
-  | { kind: "class" }
-  | { kind: "homework"; assignmentId: string }
-  | { kind: "t_class"; classId: string }
-  | { kind: "t_student"; studentId: string }
-  | { kind: "t_distribute"; classId: string | null }
-  | { kind: "t_assignment"; assignmentId: string };
 
 export default function App() {
   return (
@@ -484,10 +641,25 @@ function ProtectedApp() {
           </View>
           <Text style={styles.profileErrorTitle}>프로필을 불러오지 못했습니다</Text>
           <Text style={styles.profileErrorBody}>{profileError}</Text>
-          <Pressable style={styles.profilePrimaryBtn} onPress={() => setReloadKey((x) => x + 1)}>
+          <Pressable
+            style={styles.profilePrimaryBtn}
+            onPress={() => setReloadKey((x) => x + 1)}
+            accessibilityRole="button"
+            accessibilityLabel="프로필 다시 시도"
+          >
             <Text style={styles.profilePrimaryText}>다시 시도</Text>
           </Pressable>
-          <Pressable style={styles.profileSecondaryBtn} onPress={signOut}>
+          <Pressable
+            style={styles.profileSecondaryBtn}
+            onPress={() => {
+              signOut().catch((error) => {
+                logInternalError(error, "ProtectedApp.profileErrorSignOut");
+                Alert.alert("로그아웃", getSafeErrorMessage(error, "한국어"));
+              });
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="로그아웃"
+          >
             <Text style={styles.profileSecondaryText}>로그아웃</Text>
           </Pressable>
         </View>
@@ -524,17 +696,20 @@ function ProtectedApp() {
 
 function settingsFromProfile(profile: SupabaseProfile | null): StudentSettings {
   const level = profile?.current_level || "";
+  const targetScore =
+    profile?.goal === "EJU" && level.includes("350")
+      ? "350+"
+      : profile?.goal === "EJU" && level.includes("200")
+        ? "200점"
+        : profile?.goal === "EJU"
+          ? "300점"
+          : "200점";
   return {
     role: profile?.role || "student",
-    targetScore:
-      profile?.goal === "EJU" && level.includes("350")
-        ? "350+"
-        : profile?.goal === "EJU" && level.includes("200")
-          ? "200점"
-          : profile?.goal === "EJU"
-            ? "300점"
-            : "200점",
-    examDate: profile ? `${profileGoalLabel(profile)} 준비` : "2026.06 EJU",
+    learningCourse: courseFromProfile(profile),
+    targetScore,
+    examDate: profile ? `2026.06 ${profileGoalLabel(profile) || "EJU"}` : "2026.06 EJU",
+    ejuExamPlans: defaultEjuExamPlans(targetScore),
     dailyWordGoal: profile?.role === "teacher" ? 20 : 30,
     notificationOn: true,
     studyStyle: "균형형",
@@ -549,6 +724,12 @@ function profileGoalLabel(profile: SupabaseProfile | null) {
     const [customSubject] = profile.current_level.split(" · ");
     return customSubject?.trim() || "기타 과목";
   }
+  const labels: Partial<Record<SupabaseProfile["goal"], string>> = {
+    BusinessEnglish: "스타트업 영어",
+    BusinessJapanese: "비즈니스 일본어",
+    CampusJapanese: "대학생 일본어",
+  };
+  if (labels[profile.goal]) return labels[profile.goal];
   return profile.goal;
 }
 
@@ -577,13 +758,14 @@ function AppContent({
   settings: StudentSettings;
   setSettings: React.Dispatch<React.SetStateAction<StudentSettings>>;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const { signOut, user, isGuest } = useAuth();
   const displayName = isGuest
     ? settings.role === "teacher"
       ? "EJUEDU 게스트 선생님"
       : "Guest User"
     : profile?.name || user?.email?.split("@")[0] || "Joon";
+  const ownerId = isGuest ? "guest" : user?.id || "anonymous";
   const [studentTab, setStudentTab] = useState<StudentTab>("home");
   const [teacherTab, setTeacherTab] = useState<TeacherTab>("home");
 
@@ -598,7 +780,7 @@ function AppContent({
     buildInitialAssignments(initialVocab, initialSets)
   );
 
-  const [overlay, setOverlay] = useState<OverlayScreen>({ kind: "none" });
+  const [overlay, setOverlay] = useState<AppOverlayScreen>({ kind: "none" });
   const [highlightOpen, setHighlightOpen] = useState(false);
   const [createHubOpen, setCreateHubOpen] = useState(false);
   const [quickCreateSetOpen, setQuickCreateSetOpen] = useState(false);
@@ -607,15 +789,256 @@ function AppContent({
   const [reviewQueueIds, setReviewQueueIds] = useState<string[]>([]);
   const [studiedLog, setStudiedLog] = useState<Array<{ id: string; dayKey: string; ts: number }>>([]);
   const [learningRecords, setLearningRecords] = useState<LearningRecord[]>([]);
+  const [studySessions, setStudySessions] = useState<StudySessionLog[]>([]);
+  const [learningCardBuckets, setLearningCardBuckets] = useState<Record<string, { title: string; wordIds: string[]; updatedAt: number }>>({});
   const [learningSaveError, setLearningSaveError] = useState<string | null>(null);
   const [totalXP, setTotalXP] = useState(18420);
   const [storeXP, setStoreXP] = useState(4200);
   const [redeemedRewardIds, setRedeemedRewardIds] = useState<string[]>([]);
   const [streakDays, setStreakDays] = useState(12);
+  const [attendance, setAttendance] = useState<AttendanceState>(INITIAL_ATTENDANCE);
 
   const [generatedSets, setGeneratedSets] = useState<StudySet[]>([]);
   const [userFolders, setUserFolders] = useState<UserStudyFolder[]>([]);
   const [latestDiagnostic, setLatestDiagnostic] = useState<DiagnosticResult | null>(null);
+  const [learnProgressBySession, setLearnProgressBySession] = useState<Record<string, LearnSessionProgress>>({});
+  const [localStateReady, setLocalStateReady] = useState(false);
+  const [transitionLabel, setTransitionLabel] = useState<string | null>(null);
+  const [transitionBlocking, setTransitionBlocking] = useState(false);
+  const transitionActionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const transitionHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const localSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function runScreenTransition(label: string, action: () => void, options?: { showLoading?: boolean }) {
+    if (transitionActionTimerRef.current) clearTimeout(transitionActionTimerRef.current);
+    if (transitionHideTimerRef.current) clearTimeout(transitionHideTimerRef.current);
+
+    if (!options?.showLoading) {
+      setTransitionBlocking(false);
+      setTransitionLabel(null);
+      action();
+      return;
+    }
+
+    setTransitionBlocking(true);
+    setTransitionLabel(null);
+    transitionActionTimerRef.current = setTimeout(() => {
+      setTransitionLabel(label);
+      transitionActionTimerRef.current = setTimeout(() => {
+        transitionActionTimerRef.current = null;
+        try {
+          action();
+        } finally {
+          transitionHideTimerRef.current = setTimeout(() => {
+            transitionHideTimerRef.current = null;
+            setTransitionLabel(null);
+            setTransitionBlocking(false);
+          }, 220);
+        }
+      }, 40);
+    }, 120);
+  }
+
+  function switchStudentTab(nextTab: StudentTab) {
+    if (nextTab === studentTab) return;
+    const labels: Record<StudentTab, string> = {
+      home: "홈 여는 중",
+      vocab: "단어장 여는 중",
+      library: "라이브러리 여는 중",
+      my: "마이 여는 중",
+    };
+    runScreenTransition(labels[nextTab], () => setStudentTab(nextTab), {
+      showLoading: nextTab === "vocab" || nextTab === "library",
+    });
+  }
+
+  function switchTeacherTab(nextTab: TeacherTab) {
+    if (nextTab === teacherTab) return;
+    const labels: Record<TeacherTab, string> = {
+      home: "홈 여는 중",
+      classes: "클래스 여는 중",
+      distribute: "단어 배포 여는 중",
+      status: "과제 현황 여는 중",
+      my: "마이 여는 중",
+    };
+    runScreenTransition(labels[nextTab], () => setTeacherTab(nextTab), {
+      showLoading: nextTab === "distribute",
+    });
+  }
+
+  function switchUserRole(nextRole: UserRole) {
+    if (nextRole === settings.role) return;
+    const nextLabel = nextRole === "teacher" ? "선생님 모드 여는 중" : "학생 모드 여는 중";
+    runScreenTransition(nextLabel, () => {
+      setOverlay({ kind: "none" });
+      setHighlightOpen(false);
+      setCreateHubOpen(false);
+      setQuickCreateSetOpen(false);
+      setFolderCreateOpen(false);
+      setSetWordFilter(null);
+      setSearchQuery("");
+      setSettings((prev) => ({
+        ...prev,
+        role: nextRole,
+        connectedClassId: nextRole === "student" ? prev.connectedClassId || "class_a" : null,
+      }));
+      if (nextRole === "teacher") {
+        setTeacherTab("home");
+      } else {
+        setStudentTab("home");
+      }
+    }, { showLoading: true });
+  }
+
+  useEffect(() => {
+    return () => {
+      if (transitionActionTimerRef.current) clearTimeout(transitionActionTimerRef.current);
+      if (transitionHideTimerRef.current) clearTimeout(transitionHideTimerRef.current);
+      if (localSaveTimerRef.current) clearTimeout(localSaveTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    setLocalStateReady(false);
+
+    loadLocalAppState(ownerId)
+      .then((snapshot) => {
+        if (!mounted || !snapshot) return;
+        if (snapshot.settings) {
+          setSettings((prev) => {
+            const next = { ...prev, ...snapshot.settings, learningCourse: snapshot.settings?.learningCourse || prev.learningCourse };
+            return {
+              ...next,
+              ejuExamPlans: snapshot.settings?.ejuExamPlans?.length ? snapshot.settings.ejuExamPlans : prev.ejuExamPlans,
+            };
+          });
+        }
+        if (snapshot.vocab?.length) {
+          setVocab(
+            mergeSavedVocab(snapshot.vocab, { resetFavorites: !snapshot.favoriteDefaultsReset }) || snapshot.vocab
+          );
+        }
+        if (snapshot.studySets?.length) setStudySets(mergeSavedStudySets(snapshot.studySets) || snapshot.studySets);
+        if (snapshot.assignments?.length) setAssignments(snapshot.assignments);
+        if (snapshot.reviewQueueIds) setReviewQueueIds(snapshot.reviewQueueIds);
+        if (snapshot.studiedLog) setStudiedLog(snapshot.studiedLog);
+        if (snapshot.learningRecords) setLearningRecords(snapshot.learningRecords);
+        if (snapshot.studySessions) setStudySessions(snapshot.studySessions);
+        if (snapshot.learningCardBuckets) setLearningCardBuckets(snapshot.learningCardBuckets);
+        if (typeof snapshot.totalXP === "number") setTotalXP(snapshot.totalXP);
+        if (typeof snapshot.storeXP === "number") setStoreXP(snapshot.storeXP);
+        if (snapshot.redeemedRewardIds) setRedeemedRewardIds(snapshot.redeemedRewardIds);
+        if (typeof snapshot.streakDays === "number") setStreakDays(snapshot.streakDays);
+        if (snapshot.attendance) {
+          setAttendance({
+            checkedDates: snapshot.attendance.checkedDates || [],
+            currentStreak: snapshot.attendance.currentStreak || 0,
+            longestStreak: snapshot.attendance.longestStreak || 0,
+            lastStudyDate: snapshot.attendance.lastStudyDate || null,
+          });
+        }
+        if (snapshot.generatedSets) setGeneratedSets(snapshot.generatedSets);
+        if (snapshot.userFolders) setUserFolders(snapshot.userFolders);
+        if (snapshot.latestDiagnostic) setLatestDiagnostic(snapshot.latestDiagnostic);
+        if (snapshot.learnProgressBySession) setLearnProgressBySession(snapshot.learnProgressBySession);
+        if (snapshot.navigation) {
+          if (snapshot.navigation.studentTab && STUDENT_TABS.includes(snapshot.navigation.studentTab)) {
+            setStudentTab(snapshot.navigation.studentTab);
+          }
+          if (snapshot.navigation.teacherTab && TEACHER_TABS.includes(snapshot.navigation.teacherTab)) {
+            setTeacherTab(snapshot.navigation.teacherTab);
+          }
+          if (typeof snapshot.navigation.searchQuery === "string") {
+            setSearchQuery(snapshot.navigation.searchQuery);
+          }
+          if (snapshot.navigation.setWordFilter) {
+            setSetWordFilter(snapshot.navigation.setWordFilter);
+          }
+          if (snapshot.navigation.overlay) {
+            setOverlay(snapshot.navigation.overlay);
+          }
+        }
+      })
+      .catch((error) => logInternalError(error, "AppContent.loadLocalState"))
+      .finally(() => {
+        if (mounted) setLocalStateReady(true);
+      });
+
+    return () => {
+      mounted = false;
+    };
+  }, [ownerId, setSettings]);
+
+  useEffect(() => {
+    if (!localStateReady) return;
+    if (localSaveTimerRef.current) clearTimeout(localSaveTimerRef.current);
+    localSaveTimerRef.current = setTimeout(() => {
+      saveLocalAppState(ownerId, {
+      settings,
+      vocab: compactVocabForStorage(vocab),
+      studySets: compactStudySetsForStorage(studySets),
+      assignments,
+      reviewQueueIds,
+      studiedLog: studiedLog.slice(-500),
+      learningRecords,
+      studySessions: studySessions.slice(0, 300),
+      learningCardBuckets,
+      totalXP,
+      storeXP,
+      redeemedRewardIds,
+      streakDays,
+      attendance,
+      generatedSets,
+      userFolders,
+      latestDiagnostic,
+      learnProgressBySession,
+      favoriteDefaultsReset: true,
+      navigation: {
+        studentTab,
+        teacherTab,
+        overlay,
+        searchQuery,
+        setWordFilter,
+      },
+      });
+      localSaveTimerRef.current = null;
+    }, 650);
+
+    return () => {
+      if (localSaveTimerRef.current) clearTimeout(localSaveTimerRef.current);
+    };
+  }, [
+    localStateReady,
+    ownerId,
+    settings,
+    vocab,
+    studySets,
+    assignments,
+    reviewQueueIds,
+    studiedLog,
+    learningRecords,
+    studySessions,
+    learningCardBuckets,
+    totalXP,
+    storeXP,
+    redeemedRewardIds,
+    streakDays,
+    attendance,
+    generatedSets,
+    userFolders,
+    latestDiagnostic,
+    learnProgressBySession,
+    studentTab,
+    teacherTab,
+    overlay,
+    searchQuery,
+    setWordFilter,
+  ]);
+
+  useEffect(() => {
+    setStreakDays(attendance.currentStreak);
+  }, [attendance.currentStreak]);
 
   const todayKey = dayKeyLocal(new Date());
   const studiedTodayIds = useMemo(() => {
@@ -624,20 +1047,100 @@ function AppContent({
   }, [studiedLog, todayKey]);
 
   const studiedTodayCount = studiedTodayIds.length;
-  const todayLearningRecords = useMemo(
-    () => learningRecords.filter((record) => dayKeyLocal(new Date(record.created_at)) === todayKey),
-    [learningRecords, todayKey]
+  const studiedWordIdSet = useMemo(() => new Set(studiedLog.map((item) => item.id)), [studiedLog]);
+  const trustedLearningRecords = useMemo(
+    () =>
+      learningRecords.filter((record) => {
+        if (!vocabById.has(record.question_id)) return false;
+        if (record.id?.startsWith(LOCAL_LEARNING_RECORD_PREFIX)) return true;
+        if (record.error_type === "진단") return true;
+        if (studiedWordIdSet.has(record.question_id)) return true;
+        return Boolean(record.id && record.user_id && record.user_id !== "guest");
+      }),
+    [learningRecords, studiedWordIdSet, vocabById]
   );
-  const learningMetricBase = todayLearningRecords.length ? todayLearningRecords : learningRecords;
+  const todayLearningRecords = useMemo(
+    () => trustedLearningRecords.filter((record) => dayKeyLocal(new Date(record.created_at)) === todayKey),
+    [trustedLearningRecords, todayKey]
+  );
+  const learningMetricBase = todayLearningRecords.length ? todayLearningRecords : trustedLearningRecords;
   const learningTodayQuestionCount = todayLearningRecords.length;
   const learningAccuracy = useMemo(() => {
     if (!learningMetricBase.length) return 0;
     const correct = learningMetricBase.filter((record) => record.is_correct).length;
     return Math.round((correct / learningMetricBase.length) * 100);
   }, [learningMetricBase]);
+  const todayStudySessions = useMemo(
+    () => studySessions.filter((session) => session.dayKey === todayKey),
+    [studySessions, todayKey]
+  );
+  const todayStudySeconds = useMemo(
+    () => todayStudySessions.reduce((sum, session) => sum + Math.max(0, session.seconds), 0),
+    [todayStudySessions]
+  );
+  const todayStudyBonusXP = useMemo(
+    () => todayStudySessions.reduce((sum, session) => sum + Math.max(0, session.bonusXP), 0),
+    [todayStudySessions]
+  );
+  const todayStudyCourseSummaries = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        courseTitle: string;
+        seconds: number;
+        activityCount: number;
+        questionCount: number;
+        correctCount: number;
+        wrongCount: number;
+        knownCount: number;
+        learningCount: number;
+        bonusXP: number;
+      }
+    >();
+
+    for (const session of todayStudySessions) {
+      const key = session.course;
+      const current =
+        grouped.get(key) ||
+        {
+          courseTitle: session.courseTitle,
+          seconds: 0,
+          activityCount: 0,
+          questionCount: 0,
+          correctCount: 0,
+          wrongCount: 0,
+          knownCount: 0,
+          learningCount: 0,
+          bonusXP: 0,
+        };
+      current.seconds += Math.max(0, session.seconds);
+      current.activityCount += 1;
+      current.questionCount += Math.max(0, session.questionCount);
+      current.correctCount += Math.max(0, session.correctCount);
+      current.wrongCount += Math.max(0, session.wrongCount);
+      current.knownCount += Math.max(0, session.knownCount);
+      current.learningCount += Math.max(0, session.learningCount);
+      current.bonusXP += Math.max(0, session.bonusXP);
+      grouped.set(key, current);
+    }
+
+    return Array.from(grouped.values()).sort(
+      (a, b) => b.seconds - a.seconds || b.questionCount - a.questionCount || b.bonusXP - a.bonusXP
+    );
+  }, [todayStudySessions]);
   const wrongLearningRecords = useMemo(
-    () => learningRecords.filter((record) => !record.is_correct),
-    [learningRecords]
+    () =>
+      trustedLearningRecords.filter(
+        (record) => !record.is_correct && !SELF_ASSESSMENT_ERROR_TYPES.has(record.error_type)
+      ),
+    [trustedLearningRecords]
+  );
+  const selfAssessmentLearningRecords = useMemo(
+    () =>
+      trustedLearningRecords.filter(
+        (record) => !record.is_correct && SELF_ASSESSMENT_ERROR_TYPES.has(record.error_type)
+      ),
+    [trustedLearningRecords]
   );
   const wrongWordStats = useMemo(() => {
     const stats: Record<string, { wrong: number; recent: number }> = {};
@@ -651,6 +1154,34 @@ function AppContent({
     }
     return stats;
   }, [vocabById, wrongLearningRecords]);
+
+  useEffect(() => {
+    if (!localStateReady) return;
+    setVocab((prev) => {
+      let changed = false;
+      const next = prev.map((item) => {
+        const stats = wrongWordStats[item.id];
+        const wrongCount = stats?.wrong ?? 0;
+        const recentWrongAttempts7d = stats?.recent ?? 0;
+        if (
+          item.wrongCount === wrongCount &&
+          item.cumulativeWrongAttempts === wrongCount &&
+          item.recentWrongAttempts7d === recentWrongAttempts7d
+        ) {
+          return item;
+        }
+        changed = true;
+        return {
+          ...item,
+          wrongCount,
+          cumulativeWrongAttempts: wrongCount,
+          recentWrongAttempts7d,
+        };
+      });
+      return changed ? next : prev;
+    });
+  }, [localStateReady, wrongWordStats]);
+
   const recentWrongLearningRecords = useMemo(
     () => wrongLearningRecords.slice(0, 5),
     [wrongLearningRecords]
@@ -664,7 +1195,7 @@ function AppContent({
   );
   const learningWeakTop3 = useMemo(() => {
     const stats = new Map<string, { topic: string; errorType: string; subject: string; wrong: number; attempts: number }>();
-    for (const record of learningRecords) {
+    for (const record of trustedLearningRecords) {
       const key = `${record.topic}__${record.error_type}`;
       const prev = stats.get(key) || {
         topic: record.topic,
@@ -681,7 +1212,7 @@ function AppContent({
       .filter((item) => item.wrong > 0)
       .sort((a, b) => b.wrong - a.wrong || b.attempts - a.attempts)
       .slice(0, 3);
-  }, [learningRecords]);
+  }, [trustedLearningRecords]);
 
   useEffect(() => {
     let mounted = true;
@@ -734,12 +1265,17 @@ function AppContent({
   const reviewTodayCount = useMemo(() => reviewQueueIds.length, [reviewQueueIds]);
   const favoriteWordIds = useMemo(() => vocab.filter((v) => v.isFavorite).map((v) => v.id), [vocab]);
   const curiosityWordIds = useMemo(
-    () => vocab.filter((v) => v.part === "궁금한 일본어" || v.questionTypes.includes("개인 검색")).map((v) => v.id),
+    () =>
+      vocab
+        .filter((v) => v.part === "궁금한 일본어" || v.part === "궁금한 표현" || v.part === "궁금한 전문 영어" || v.questionTypes.includes("개인 검색"))
+        .map((v) => v.id),
     [vocab]
   );
   const favoriteSet = useMemo<StudySet>(
     () => ({
       id: "set_favorites",
+      userId: ownerId,
+      ownerId,
       title: "즐겨찾기한 단어",
       description: "별표한 단어만 모아 복습하는 개인 세트",
       createdFrom: "custom",
@@ -755,15 +1291,17 @@ function AppContent({
           )
         : 0,
     }),
-    [favoriteWordIds, vocab]
+    [favoriteWordIds, ownerId, vocab]
   );
   const curiositySet = useMemo<StudySet>(
     () => ({
       id: "set_curiosity",
-      title: "궁금한 일본어",
+      userId: ownerId,
+      ownerId,
+      title: "궁금한 표현",
       description: curiosityWordIds.length
-        ? "검색해서 저장한 일본어를 모아두는 개인 세트"
-        : "검색한 일본어가 자동으로 저장되는 개인 세트",
+        ? "검색해서 저장한 일본어·영어 표현을 모아두는 개인 세트"
+        : "검색한 일본어·영어 표현이 자동으로 저장되는 개인 세트",
       createdFrom: "custom",
       weakTypes: ["개인 검색"],
       wordIds: curiosityWordIds,
@@ -776,11 +1314,13 @@ function AppContent({
           )
         : 0,
     }),
-    [curiosityWordIds, vocabById]
+    [curiosityWordIds, ownerId, vocabById]
   );
   const highlightSet = useMemo<StudySet>(
     () => ({
       id: "set_highlight",
+      userId: ownerId,
+      ownerId,
       title: "형광펜 단어장",
       description: highlightWordIds.length
         ? "형광펜으로 추가한 단어만 모아 복습하는 개인 세트"
@@ -797,15 +1337,23 @@ function AppContent({
           )
         : 0,
     }),
-    [highlightWordIds, vocabById]
+    [highlightWordIds, ownerId, vocabById]
   );
+  const sourceSetTitleById = useMemo(() => {
+    const entries = [favoriteSet, curiositySet, highlightSet, ...studySets, ...generatedSets].map(
+      (set) => [set.id, set.title] as const
+    );
+    return new Map(entries);
+  }, [curiositySet, favoriteSet, generatedSets, highlightSet, studySets]);
   const wrongSet = useMemo<StudySet>(
     () => ({
       id: "set_wrong",
-      title: "오답 단어장",
+      userId: ownerId,
+      ownerId,
+      title: "전체 오답 단어장",
       description: actualWrongReviewIds.length
-        ? "실제로 틀린 단어만 모아 다시 보는 개인 세트"
-        : "학습 중 틀린 단어가 생기면 여기에 자동으로 모입니다",
+        ? "퀴즈·테스트에서 실제로 틀린 단어만 모아 다시 보는 전체 오답 세트"
+        : "퀴즈·테스트에서 틀린 단어가 생기면 여기에 자동으로 모입니다",
       createdFrom: "wrong",
       weakTypes: ["오답"],
       wordIds: actualWrongReviewIds,
@@ -818,17 +1366,117 @@ function AppContent({
           )
         : 0,
     }),
-    [actualWrongReviewIds, vocabById]
+    [actualWrongReviewIds, ownerId, vocabById]
   );
+  const sourceWrongSets = useMemo<StudySet[]>(() => {
+    const groups = new Map<string, { title: string; ids: string[]; updatedAt: number }>();
+    wrongLearningRecords.forEach((record) => {
+      const sourceKey = record.source_set_id && !reviewDerivedSetId(record.source_set_id)
+        ? record.source_set_id
+        : record.source_set_title
+        ? `session:${record.source_set_title}`
+        : "";
+      if (!sourceKey || !vocabById.has(record.question_id)) return;
+      const sourceTitle =
+        record.source_set_title ||
+        sourceSetTitleById.get(record.source_set_id || "") ||
+        "세트 미지정";
+      const current = groups.get(sourceKey) || { title: sourceTitle, ids: [], updatedAt: 0 };
+      if (!current.ids.includes(record.question_id)) current.ids.push(record.question_id);
+      current.updatedAt = Math.max(current.updatedAt, new Date(record.created_at).getTime() || 0);
+      groups.set(sourceKey, current);
+    });
+
+    return Array.from(groups.entries())
+      .map(([key, group]) => ({
+        id: dynamicSetId("set_wrong", key),
+        userId: ownerId,
+        ownerId,
+        title: `${group.title} · 오답 단어장`,
+        description: "이 세트에서 퀴즈·테스트로 실제 틀린 단어만 모았습니다.",
+        createdFrom: "wrong" as const,
+        weakTypes: ["오답", group.title],
+        wordIds: group.ids,
+        wordCount: group.ids.length,
+        createdAt: group.updatedAt || 5,
+        progress: group.ids.length
+          ? Math.round(group.ids.reduce((sum, id) => sum + (vocabById.get(id)?.masteryLevel ?? 0), 0) / group.ids.length)
+          : 0,
+      }))
+      .filter((set) => set.wordCount > 0)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [ownerId, sourceSetTitleById, vocabById, wrongLearningRecords]);
+  const learningCardSets = useMemo<StudySet[]>(() => {
+    const groups = new Map<string, { title: string; ids: string[]; updatedAt: number }>();
+    Object.entries(learningCardBuckets).forEach(([key, bucket]) => {
+      const ids = uniq(bucket.wordIds).filter((id) => vocabById.has(id));
+      if (!ids.length) return;
+      groups.set(key, {
+        title: bucket.title || sourceSetTitleById.get(key) || "학습 중 낱말카드",
+        ids,
+        updatedAt: bucket.updatedAt || 0,
+      });
+    });
+    selfAssessmentLearningRecords.forEach((record) => {
+      if (!vocabById.has(record.question_id)) return;
+      const sourceKey = learningCardBucketKey(record.source_set_id, record.source_set_title || "기존 낱말카드");
+      const sourceTitle =
+        record.source_set_title ||
+        sourceSetTitleById.get(record.source_set_id || "") ||
+        "기존 낱말카드";
+      const current = groups.get(sourceKey) || { title: sourceTitle, ids: [], updatedAt: 0 };
+      if (!current.ids.includes(record.question_id)) current.ids.push(record.question_id);
+      current.updatedAt = Math.max(current.updatedAt, new Date(record.created_at).getTime() || 0);
+      groups.set(sourceKey, current);
+    });
+
+    return Array.from(groups.entries())
+      .map(([key, group]) => ({
+        id: dynamicSetId("set_learning", key),
+        userId: ownerId,
+        ownerId,
+        title: `${group.title} · 학습 중 낱말카드`,
+        description: "낱말카드에서 아직 학습 중으로 표시한 단어만 모았습니다.",
+        createdFrom: "learning" as const,
+        weakTypes: ["학습 중", group.title],
+        wordIds: group.ids,
+        wordCount: group.ids.length,
+        createdAt: group.updatedAt || 6,
+        progress: group.ids.length
+          ? Math.round(group.ids.reduce((sum, id) => sum + (vocabById.get(id)?.masteryLevel ?? 0), 0) / group.ids.length)
+          : 0,
+      }))
+      .filter((set) => set.wordCount > 0)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }, [learningCardBuckets, ownerId, selfAssessmentLearningRecords, sourceSetTitleById, vocabById]);
   const visibleStudySets = useMemo(
     () => [
-      favoriteSet,
-      curiositySet,
-      highlightSet,
-      wrongSet,
+      ...[...learningCardSets, ...sourceWrongSets, wrongSet, highlightSet, favoriteSet, curiositySet].filter(
+        (set) => set.wordCount > 0
+      ),
       ...studySets.filter((set) => !["set_favorites", "set_curiosity", "set_highlight", "set_wrong"].includes(set.id)),
     ],
-    [curiositySet, favoriteSet, highlightSet, studySets, wrongSet]
+    [curiositySet, favoriteSet, highlightSet, learningCardSets, sourceWrongSets, studySets, wrongSet]
+  );
+  const personalHomeSets = useMemo(
+    () =>
+      [
+        ...learningCardSets,
+        ...sourceWrongSets,
+        highlightSet,
+        wrongSet,
+        favoriteSet,
+        curiositySet,
+        ...studySets.filter((set) => set.createdFrom !== "builtin"),
+      ]
+        .filter((set) => set.wordCount > 0)
+        .filter((set, index, arr) => arr.findIndex((item) => item.id === set.id) === index)
+        .slice(0, 4),
+    [curiositySet, favoriteSet, highlightSet, learningCardSets, sourceWrongSets, studySets, wrongSet]
+  );
+  const courseVocab = useMemo(
+    () => vocab.filter((item) => wordMatchesLearningCourse(item, settings.learningCourse)),
+    [settings.learningCourse, vocab]
   );
 
   const recentlyStudied = useMemo(() => {
@@ -852,6 +1500,21 @@ function AppContent({
   function gainXP(xp: number) {
     setTotalXP((p) => p + xp);
     setStoreXP((p) => p + xp);
+  }
+
+  function recordCompletedStudySession(summary: Omit<StudySessionLog, "id" | "dayKey" | "course" | "courseTitle" | "completedAt">) {
+    const courseMeta = getLearningCourseMeta(settings.learningCourse);
+    const completedAt = Date.now();
+    const id = `study_${completedAt}_${Math.random().toString(36).slice(2, 8)}`;
+    const log: StudySessionLog = {
+      id,
+      dayKey: dayKeyLocal(new Date(completedAt)),
+      course: settings.learningCourse,
+      courseTitle: courseMeta.title,
+      completedAt,
+      ...summary,
+    };
+    setStudySessions((prev) => [log, ...prev].slice(0, 300));
   }
 
   function exchangeReward(item: RewardItem) {
@@ -882,6 +1545,42 @@ function AppContent({
 
   function markStudied(wordId: string) {
     setStudiedLog((prev) => prev.concat({ id: wordId, dayKey: todayKey, ts: Date.now() }));
+    setAttendance((prev) => markAttendanceDay(prev, todayKey));
+  }
+
+  function queueWrongReview(wordId: string) {
+    if (!vocabById.has(wordId)) return;
+    setReviewQueueIds((prev) => (prev.includes(wordId) ? prev : [wordId, ...prev]));
+  }
+
+  function markLearningCard(wordId: string, source?: { sourceSetId?: string; sourceTitle?: string }) {
+    if (!vocabById.has(wordId)) return;
+    const key = learningCardBucketKey(source?.sourceSetId, source?.sourceTitle);
+    const title = source?.sourceTitle || sourceSetTitleById.get(source?.sourceSetId || "") || "학습 중 낱말카드";
+    setLearningCardBuckets((prev) => {
+      const current = prev[key] || { title, wordIds: [], updatedAt: 0 };
+      return {
+        ...prev,
+        [key]: {
+          title: current.title || title,
+          wordIds: current.wordIds.includes(wordId) ? current.wordIds : [wordId, ...current.wordIds],
+          updatedAt: Date.now(),
+        },
+      };
+    });
+  }
+
+  function resolveLearningCard(wordId: string) {
+    setLearningCardBuckets((prev) => {
+      let changed = false;
+      const next: typeof prev = {};
+      Object.entries(prev).forEach(([key, bucket]) => {
+        const wordIds = bucket.wordIds.filter((id) => id !== wordId);
+        if (wordIds.length !== bucket.wordIds.length) changed = true;
+        if (wordIds.length) next[key] = { ...bucket, wordIds, updatedAt: Date.now() };
+      });
+      return changed ? next : prev;
+    });
   }
 
   function recordLearningResult(record: Omit<LearningRecord, "id" | "user_id" | "created_at">) {
@@ -891,21 +1590,36 @@ function AppContent({
 
     const localRecord: LearningRecord = {
       ...record,
+      id: `${LOCAL_LEARNING_RECORD_PREFIX}${created_at}_${record.question_id}`,
       user_id,
       created_at,
     };
     setLearningRecords((prev) => [localRecord, ...prev].slice(0, 100));
+    if (!record.is_correct && !SELF_ASSESSMENT_ERROR_TYPES.has(record.error_type)) {
+      queueWrongReview(record.question_id);
+    }
 
     if (isGuest) return;
+    if (!canModifyRecord(localRecord, user)) {
+      logInternalError("Blocked learning record write for non-owner", "recordLearningResult");
+      setLearningSaveError(t("학습 기록 저장 권한을 확인하지 못했습니다. 다시 로그인해 주세요."));
+      return;
+    }
 
-    insertLearningRecord(localRecord)
+    const {
+      id: _localId,
+      source_set_id: _sourceSetId,
+      source_set_title: _sourceSetTitle,
+      ...recordToInsert
+    } = localRecord;
+    insertLearningRecord(recordToInsert)
       .then((saved) => {
         setLearningSaveError(null);
         setLearningRecords((prev) => {
           const next = prev.slice();
           const idx = next.findIndex(
             (item) =>
-              !item.id &&
+              (item.id === localRecord.id || !item.id) &&
               item.created_at === localRecord.created_at &&
               item.question_id === localRecord.question_id
           );
@@ -940,11 +1654,11 @@ function AppContent({
       return existing.id;
     }
 
-    const nextWord = dictionaryWord;
+    const nextWord = { ...dictionaryWord, ownerId, userId: ownerId };
     setVocab((prev) => (prev.some((item) => item.id === nextWord.id) ? prev : [nextWord, ...prev]));
     setReviewQueueIds((prev) => (prev.includes(nextWord.id) ? prev : [nextWord.id, ...prev]));
     Alert.alert(
-      t("궁금한 일본어 저장"),
+      t("궁금한 표현 저장"),
       `${term}${t("를 개인 세트에 저장했습니다.")}\n${t("뜻과 독음은 단어 상세에서 다시 확인할 수 있습니다.")}`
     );
     return nextWord.id;
@@ -952,9 +1666,11 @@ function AppContent({
 
   function goVocabWithSearch(q?: string) {
     const term = q?.trim() || "";
-    setStudentTab("vocab");
-    setSetWordFilter(null);
-    if (term) setSearchQuery(term);
+    runScreenTransition("단어장 여는 중", () => {
+      setStudentTab("vocab");
+      setSetWordFilter(null);
+      if (term) setSearchQuery(term);
+    }, { showLoading: true });
   }
 
   function updateWordStats(wordId: string, delta: { wrongDelta: number; masteryDelta: number }) {
@@ -1029,23 +1745,46 @@ function AppContent({
     const find = (id: string) => base.find((s) => s.id === id);
     const pick = (...ids: string[]) => {
       const picked = ids.map(find).filter(Boolean) as StudySet[];
-      const personal = [favoriteSet, curiositySet].filter((set) => set.wordCount > 0);
-      return [...personal, ...picked].slice(0, 4);
+      return picked.slice(0, 4);
     };
+    const courseMeta = getLearningCourseMeta(settings.learningCourse);
+    const coursePick = pick(...courseMeta.primarySetIds);
 
-    if (settings.studyStyle === "오답집중형") return pick("set_wrong", "set_reason", "set_table", "set_top100");
-    if (settings.studyStyle === "기출빈도형") return pick("set_top100", "set_350", "set_economy", "set_reason");
+    if (settings.studyStyle === "오답집중형") {
+      return [wrongSet.wordCount ? wrongSet : null, ...pick("set_recent_eju_2016_2025", "set_reason", "set_table")]
+        .filter(Boolean)
+        .slice(0, 4) as StudySet[];
+    }
+    if (coursePick.length > 0) return coursePick;
+    if (profile?.goal === "TOEIC" || profile?.goal === "TOEFL" || profile?.goal === "IELTS") {
+      return pick("set_english_admission", "set_business_english_sentences", "set_startup_business_english", "set_academic_abstract");
+    }
+    if (profile?.goal === "BusinessEnglish") {
+      return pick("set_startup_business_english", "set_business_english_sentences", "set_english_admission", "set_academic_abstract");
+    }
+    if (profile?.goal === "BusinessJapanese") {
+      return pick("set_business_japanese", "set_campus_japanese", "set_writing", "set_reading_context");
+    }
+    if (profile?.goal === "CampusJapanese") {
+      return pick("set_campus_japanese", "set_business_japanese", "set_reading_context", "set_academic_abstract");
+    }
+    if (settings.studyStyle === "기출빈도형") return pick("set_recent_eju_2016_2025", "set_top100", "set_350", "set_reason");
     if (settings.studyStyle === "예문중심형") return pick("set_writing", "set_reading_relation", "set_claim", "set_table");
     if (settings.studyStyle === "문제풀이형") return pick("set_reason", "set_claim", "set_listening_notice", "set_economy");
     if (settings.studyStyle === "빠른 암기형") return pick("set_200", "set_reading_context", "set_table", "set_market_price");
-    return pick("set_top100", "set_300", "set_table", "set_writing");
-  }, [curiositySet, favoriteSet, studySets, settings.studyStyle]);
+    return pick("set_recent_eju_2016_2025", "set_top100", "set_table", "set_writing");
+  }, [profile?.goal, studySets, settings.learningCourse, settings.studyStyle, wrongSet]);
 
   const defaultVocabSort = useMemo(() => {
+    if (settings.learningCourse === "EJU_SCIENCE") return "중요도순" as const;
     if (settings.studyStyle === "기출빈도형") return "기출 빈도순" as const;
     if (settings.studyStyle === "오답집중형") return "오답 많은 순" as const;
     return "기출 빈도순" as const;
-  }, [settings.studyStyle]);
+  }, [settings.learningCourse, settings.studyStyle]);
+
+  function changeLearningCourse(course: LearningCourse) {
+    setSettings((prev) => (prev.learningCourse === course ? prev : { ...prev, learningCourse: course }));
+  }
 
   const classHomeworkSummary = useMemo(() => {
     if (!settings.connectedClassId) return null;
@@ -1057,66 +1796,185 @@ function AppContent({
     const total = Math.max(1, a.wordIds.length);
     const progress = Object.values(a.progressByStudent)[0] ?? 0;
     const pct = Math.round((progress / total) * 100);
+    const availability = getAssignmentAvailability(a);
     return {
       className: cls.name,
       title: a.title,
       dueDateLabel: a.dueDate,
       progressLabel: `${progress}/${total}`,
       progressPct: pct,
+      assignmentKind: a.assignmentKind || "단어 과제",
+      availabilityStatusLabel: availability.statusLabel,
+      availabilityLabel: availability.availableLabel,
+      isOpen: availability.isOpen,
     };
   }, [assignments, settings.connectedClassId]);
+
+  const teacherAccountSummary = useMemo(() => {
+    const activeAssignments = assignments.filter((assignment) =>
+      Object.values(assignment.statusByStudent).some((status) => status !== "완료")
+    );
+    const completionRates = assignments.map((assignment) => {
+      const statuses = Object.values(assignment.statusByStudent);
+      if (!statuses.length) return 0;
+      return (statuses.filter((status) => status === "완료").length / statuses.length) * 100;
+    });
+    const avgCompletion = completionRates.length
+      ? Math.round(completionRates.reduce((sum, value) => sum + value, 0) / completionRates.length)
+      : 0;
+    return {
+      academyName: "EJUEDU",
+      classCount: EJUEDU_CLASSES.length,
+      studentCount: EJUEDU_STUDENTS.length,
+      activeAssignmentCount: activeAssignments.length,
+      pendingAssignmentCount: activeAssignments.length,
+      avgCompletion,
+      classNames: EJUEDU_CLASSES.map((cls) => cls.name),
+    };
+  }, [assignments]);
 
   function openWord(wordId: string) {
     setOverlay({ kind: "word", wordId });
   }
   function openSet(setId: string) {
-    setOverlay({ kind: "set", setId });
+    const set = visibleStudySets.find((item) => item.id === setId);
+    const isLargeSet = (set?.wordCount || set?.wordIds.length || 0) > 160;
+    runScreenTransition("세트 여는 중", () => setOverlay({ kind: "set", setId }), { showLoading: isLargeSet });
   }
 
-  function openLearn(wordIds: string[], title: string, mode: LearnMode) {
+  function isEditableStudySet(set: StudySet) {
+    return (
+      studySets.some((item) => item.id === set.id) &&
+      set.createdFrom !== "builtin" &&
+      set.createdFrom !== "wrong" &&
+      set.createdFrom !== "learning" &&
+      (canModifyRecord(set, { id: ownerId }) ||
+        (set.createdFrom === "custom" && !set.userId && !set.ownerId))
+    );
+  }
+
+  function openLearn(wordIds: string[], title: string, mode: LearnMode, sourceSetId?: string) {
     if (!wordIds.length) {
       Alert.alert(t("학습"), t("학습할 단어가 아직 없습니다."));
       return;
     }
-    setOverlay({ kind: "learn", title, mode, wordIds });
+    runScreenTransition("학습 준비 중", () => setOverlay({ kind: "learn", title, mode, wordIds, sourceSetId }), {
+      showLoading: wordIds.length > 80,
+    });
+  }
+
+  function updateLearnProgress(sessionKey: string, progress: LearnSessionProgress) {
+    const storageKey = learnProgressKey(sessionKey, progress.activeMode);
+    setLearnProgressBySession((prev) => {
+      const current = prev[storageKey];
+      if (
+        current &&
+        current.activeMode === progress.activeMode &&
+        current.index === progress.index &&
+        current.totalCount === progress.totalCount &&
+        current.showMeaning === progress.showMeaning
+      ) {
+        return prev;
+      }
+      return { ...prev, [storageKey]: progress };
+    });
+  }
+
+  function updateStudySetProgressFromLearn(sourceSetId: string | undefined, progress: LearnSessionProgress) {
+    if (progress.activeMode === "오답 복습") return;
+    if (!sourceSetId || !progress.totalCount) return;
+    const nextProgress = Math.max(0, Math.min(100, Math.round((progress.index / progress.totalCount) * 100)));
+    setStudySets((prev) =>
+      prev.map((set) =>
+        set.id === sourceSetId && nextProgress > set.progress
+          ? { ...set, progress: nextProgress }
+          : set
+      )
+    );
   }
 
   function startTodayLearn() {
-    const actualWrongWords = actualWrongReviewIds
-      .map((id) => vocabById.get(id))
-      .filter(Boolean) as VocabItem[];
-    const pool =
-      settings.studyStyle === "오답집중형" && actualWrongWords.length
-        ? actualWrongWords
-            .slice()
-            .sort((a, b) => b.recentWrongAttempts7d - a.recentWrongAttempts7d || b.wrongCount - a.wrongCount)
-        : settings.studyStyle === "기출빈도형"
-        ? vocab.slice().sort((a, b) => b.occurrenceCount - a.occurrenceCount)
-        : vocab.slice().sort((a, b) => b.frequencyScore - a.frequencyScore);
-    const ids = pool.slice(0, Math.max(20, settings.dailyWordGoal)).map((v) => v.id);
-    openLearn(ids, "오늘 학습", "낱말카드");
+    runScreenTransition("오늘 학습 준비 중", () => {
+      const actualWrongWords = actualWrongReviewIds
+        .map((id) => vocabById.get(id))
+        .filter((item): item is VocabItem => Boolean(item && wordMatchesLearningCourse(item, settings.learningCourse)));
+      const baseCourseVocab = courseVocab.length ? courseVocab : vocab;
+      const pool =
+        settings.studyStyle === "오답집중형" && actualWrongWords.length
+          ? actualWrongWords
+              .slice()
+              .sort((a, b) => b.recentWrongAttempts7d - a.recentWrongAttempts7d || b.wrongCount - a.wrongCount)
+          : settings.studyStyle === "기출빈도형"
+          ? baseCourseVocab.slice().sort((a, b) => b.occurrenceCount - a.occurrenceCount)
+          : baseCourseVocab.slice().sort((a, b) => b.frequencyScore - a.frequencyScore);
+      const ids = pool.slice(0, Math.max(20, settings.dailyWordGoal)).map((v) => v.id);
+      if (!ids.length) {
+        Alert.alert(t("학습"), t("학습할 단어가 아직 없습니다."));
+        return;
+      }
+      setOverlay({ kind: "learn", title: "오늘 학습", mode: "낱말카드", wordIds: ids });
+    }, { showLoading: settings.dailyWordGoal > 80 || courseVocab.length > 400 });
   }
 
   function startWrongReview() {
-    const ids = recentWrongReviewIds
-      .map((id) => vocabById.get(id))
-      .filter(Boolean)
-      .sort((a, b) => (b?.recentWrongAttempts7d || 0) - (a?.recentWrongAttempts7d || 0) || (b?.wrongCount || 0) - (a?.wrongCount || 0))
-      .map((v) => v!.id);
-    if (!ids.length) {
-      Alert.alert(t("오답 복습"), t("아직 실제 오답 기록이 없습니다. 퀴즈나 진단에서 틀린 단어가 생기면 여기에 모입니다."));
-      return;
-    }
-    openLearn(ids, "이번 주 오답 복습", "오답 복습");
+    runScreenTransition("오답 복습 준비 중", () => {
+      const ids = recentWrongReviewIds
+        .map((id) => vocabById.get(id))
+        .filter(Boolean)
+        .sort((a, b) => (b?.recentWrongAttempts7d || 0) - (a?.recentWrongAttempts7d || 0) || (b?.wrongCount || 0) - (a?.wrongCount || 0))
+        .map((v) => v!.id);
+      if (!ids.length) {
+        Alert.alert(t("오답 복습"), t("아직 실제 오답 기록이 없습니다. 퀴즈나 진단에서 틀린 단어가 생기면 여기에 모입니다."));
+        return;
+      }
+      setOverlay({ kind: "learn", title: "이번 주 오답 복습", mode: "오답 복습", wordIds: ids });
+    }, { showLoading: recentWrongReviewIds.length > 80 });
   }
 
   function openDiagnostic() {
-    setOverlay({ kind: "diagnostic" });
+    runScreenTransition("진단 테스트 여는 중", () => setOverlay({ kind: "diagnostic" }), { showLoading: true });
   }
 
   function openReport() {
     setOverlay({ kind: "report" });
   }
+
+  const recentLearningResume = useMemo(() => {
+    const candidates = Object.entries(learnProgressBySession)
+      .map(([key, progress]) => {
+        const total = progress.totalCount || 0;
+        const index = Math.max(0, Math.min(progress.index, total));
+        if (!total || index <= 0 || index >= total) return null;
+        const suffix = `::${progress.activeMode}`;
+        const sessionKey = key.endsWith(suffix) ? key.slice(0, -suffix.length) : key;
+        const splitAt = sessionKey.indexOf("::");
+        if (splitAt < 0) return null;
+        const title = sessionKey.slice(0, splitAt).trim() || "최근 학습";
+        const wordIds = sessionKey
+          .slice(splitAt + 2)
+          .split("|")
+          .filter((id) => vocabById.has(id));
+        if (!wordIds.length) return null;
+        return {
+          title,
+          mode: progress.activeMode,
+          wordIds,
+          progressLabel: `${index}/${total}`,
+          progressPct: Math.max(0, Math.min(100, Math.round((index / total) * 100))),
+          updatedAt: progress.updatedAt || 0,
+        };
+      })
+      .filter(Boolean) as Array<{
+        title: string;
+        mode: LearnMode;
+        wordIds: string[];
+        progressLabel: string;
+        progressPct: number;
+        updatedAt: number;
+      }>;
+
+    return candidates.sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
+  }, [learnProgressBySession, vocabById]);
 
   function openClass() {
     setOverlay({ kind: "class" });
@@ -1129,12 +1987,7 @@ function AppContent({
   function openUserFolder(folderId: string) {
     const folder = userFolders.find((f) => f.id === folderId);
     if (!folder) return;
-    if (!folder.setIds.length) {
-      Alert.alert(t("폴더"), t("아직 세트가 없는 폴더입니다."));
-      return;
-    }
-    const firstSet = visibleStudySets.find((set) => folder.setIds.includes(set.id));
-    if (firstSet) openSet(firstSet.id);
+    setOverlay({ kind: "folder", folderId });
   }
 
   function openTeacherClass(classId: string) {
@@ -1144,7 +1997,7 @@ function AppContent({
     setOverlay({ kind: "t_student", studentId });
   }
   function openTeacherDistribute(classId: string | null) {
-    setOverlay({ kind: "t_distribute", classId });
+    runScreenTransition("단어 배포 여는 중", () => setOverlay({ kind: "t_distribute", classId }), { showLoading: studySets.length > 40 });
   }
   function openTeacherAssignment(assignmentId: string) {
     setOverlay({ kind: "t_assignment", assignmentId });
@@ -1159,6 +2012,8 @@ function AppContent({
       .map((v) => v.id);
     const set: StudySet = {
       id: `set_weak_${Date.now()}`,
+      userId: ownerId,
+      ownerId,
       title: `약점 기반 세트 - ${typeName}`,
       description: `${typeName} 유형 약점을 줄이기 위한 자동 생성 세트`,
       createdFrom: "diagnostic",
@@ -1176,6 +2031,8 @@ function AppContent({
 
   function onDiagnosticComplete(res: DiagnosticResult, wrongWordIds: string[]) {
     setLatestDiagnostic(res);
+    gainXP(Math.max(10, Math.round(res.questionCount * 1.2)));
+    setAttendance((prev) => markAttendanceDay(prev, todayKey));
     uniq(wrongWordIds).forEach((wordId) => {
       const item = vocabById.get(wordId);
       if (!item) return;
@@ -1199,6 +2056,8 @@ function AppContent({
     const ids = uniq(wordIds).slice(0, 80);
     const set: StudySet = {
       id: `set_diag_${Date.now()}`,
+      userId: ownerId,
+      ownerId,
       title: `진단 기반 약점 세트 - ${name}`,
       description: `진단 결과 약한 유형(${weakTypes.join(", ")}) 기반 자동 생성`,
       createdFrom: "diagnostic",
@@ -1214,20 +2073,79 @@ function AppContent({
     openSet(set.id);
   }
 
-  function createCustomStudySet(input: {
-    title: string;
-    rows: Array<{ word: string; reading: string; meaningKo: string }>;
-  }) {
-    const createdAt = Date.now();
-    const normalizedTitle = input.title.trim() || "직접 만든 단어장";
-    const uniqueRows = input.rows
+  function normalizeStudySetRows(rows: StudySetRowInput[]) {
+    return rows
       .map((row) => ({
-        word: row.word.trim(),
-        reading: row.reading.trim() || row.word.trim(),
-        meaningKo: row.meaningKo.trim(),
+        id: row.id,
+        word: sanitizeText(row.word, 80),
+        reading: sanitizeText(row.reading || row.word, 80),
+        meaningKo: sanitizeText(row.meaningKo, 160),
       }))
       .filter((row) => row.word && row.meaningKo)
-      .filter((row, index, arr) => arr.findIndex((x) => x.word === row.word) === index);
+      .filter((row, index, arr) => {
+        const key = row.id || row.word;
+        return arr.findIndex((item) => (item.id || item.word) === key) === index;
+      });
+  }
+
+  function buildCustomVocabItem(row: StudySetRowInput, id: string, index = 0): VocabItem | null {
+    const base = vocab[0];
+    if (!base) return null;
+    const customSubject: VocabItem["subject"] = /[A-Za-z]/.test(row.word) ? "영어" : "일본어";
+    const customPart = customSubject === "영어" ? "전문 용어" : "직접추가";
+    const customTypes = customSubject === "영어" ? ["직접추가", "전문 용어", "비즈니스 영어"] : ["직접추가"];
+    return {
+      ...base,
+      id,
+      userId: ownerId,
+      ownerId,
+      word: row.word,
+      reading: row.reading || row.word,
+      meaningKo: row.meaningKo,
+      level: settings.targetScore === "350+" ? "350+ 목표" : settings.targetScore === "300점" ? "300점 목표" : "200점 목표",
+      subject: customSubject,
+      part: customPart,
+      questionTypes: customTypes,
+      occurrenceCount: 0,
+      frequencyScore: Math.max(0, 20 - index),
+      difficulty: 2,
+      importance: "중요",
+      targetScore: settings.targetScore,
+      appearedIn: [],
+      synonyms: [],
+      antonyms: [],
+      relatedWords: [],
+      exampleJa: customSubject === "영어" ? `${row.word}: ${row.meaningKo}` : `${row.word}を使った例文をあとで追加できます。`,
+      exampleKo: `${row.meaningKo} 표현의 예문은 나중에 추가할 수 있습니다.`,
+      explanationKo: customSubject === "영어" ? "학생이 직접 추가한 영어 전문 용어입니다. 실제 업무 문장과 함께 복습하면 더 오래 남습니다." : "학생이 직접 추가한 단어입니다. 뜻과 독음을 먼저 암기한 뒤 예문을 보강해보세요.",
+      commonMistake: "직접 추가 표현은 교재, 업무, 수업 맥락을 함께 적어두면 복습할 때 더 정확합니다.",
+      sourceType: "직접추가",
+      reviewStatus: "Learning",
+      wrongCount: 0,
+      cumulativeWrongAttempts: 0,
+      recentWrongAttempts7d: 0,
+      masteryLevel: 0,
+      isFavorite: false,
+    };
+  }
+
+  function createCustomStudySet(input: {
+    title: string;
+    rows: StudySetRowInput[];
+  }) {
+    const createdAt = Date.now();
+    const titleValidation = validateRequiredText(input.title || "직접 만든 단어장", 60, language);
+    if (!titleValidation.ok) {
+      Alert.alert(t("세트 만들기"), titleValidation.message);
+      return;
+    }
+    if (input.rows.length > 200) {
+      Alert.alert(t("세트 만들기"), t("입력한 문장이 너무 깁니다."));
+      return;
+    }
+
+    const normalizedTitle = titleValidation.value || "직접 만든 단어장";
+    const uniqueRows = normalizeStudySetRows(input.rows);
 
     if (!uniqueRows.length) {
       Alert.alert(t("세트 만들기"), t("추가할 단어를 한 개 이상 입력해주세요."));
@@ -1237,7 +2155,6 @@ function AppContent({
     const existingByWord = new Map(vocab.map((v) => [v.word, v] as const));
     const newItems: VocabItem[] = [];
     const wordIds: string[] = [];
-    const base = vocab[0];
 
     uniqueRows.forEach((row, index) => {
       const existing = existingByWord.get(row.word);
@@ -1245,45 +2162,17 @@ function AppContent({
         wordIds.push(existing.id);
         return;
       }
-      if (!base) return;
-
       const id = `vocab_custom_${createdAt}_${index}`;
+      const nextItem = buildCustomVocabItem(row, id, index);
+      if (!nextItem) return;
       wordIds.push(id);
-      newItems.push({
-        ...base,
-        id,
-        word: row.word,
-        reading: row.reading,
-        meaningKo: row.meaningKo,
-        level: settings.targetScore === "350+" ? "350+ 목표" : settings.targetScore === "300점" ? "300점 목표" : "200점 목표",
-        subject: "일본어",
-        part: "직접추가",
-        questionTypes: ["직접추가"],
-        occurrenceCount: 0,
-        frequencyScore: 0,
-        difficulty: 2,
-        importance: "중요",
-        targetScore: settings.targetScore,
-        appearedIn: [],
-        synonyms: [],
-        antonyms: [],
-        relatedWords: [],
-        exampleJa: `${row.word}を使った例文をあとで追加できます。`,
-        exampleKo: `${row.meaningKo} 단어의 예문은 나중에 추가할 수 있습니다.`,
-        explanationKo: "학생이 직접 추가한 단어입니다. 뜻과 독음을 먼저 암기한 뒤 예문을 보강해보세요.",
-        commonMistake: "직접 추가 단어는 교재나 수업 맥락을 함께 적어두면 복습할 때 더 정확합니다.",
-        sourceType: "직접추가",
-        reviewStatus: "Learning",
-        wrongCount: 0,
-        cumulativeWrongAttempts: 0,
-        recentWrongAttempts7d: 0,
-        masteryLevel: 0,
-        isFavorite: false,
-      });
+      newItems.push(nextItem);
     });
 
     const set: StudySet = {
       id: `set_custom_${createdAt}`,
+      userId: ownerId,
+      ownerId,
       title: normalizedTitle,
       description: "학생이 직접 만든 단어장",
       createdFrom: "custom",
@@ -1300,17 +2189,149 @@ function AppContent({
     openSet(set.id);
   }
 
+  function saveStudySetEdits(setId: string, input: { title: string; description: string; rows: StudySetRowInput[] }) {
+    const target = studySets.find((set) => set.id === setId);
+    if (!target) return;
+    if (!isEditableStudySet(target)) {
+      Alert.alert(t("세트 수정하기"), t("수정 권한이 없습니다."));
+      return;
+    }
+
+    const titleValidation = validateRequiredText(input.title || target.title, 60, language);
+    if (!titleValidation.ok) {
+      Alert.alert(t("세트 수정하기"), titleValidation.message);
+      return;
+    }
+    const uniqueRows = normalizeStudySetRows(input.rows);
+    if (!uniqueRows.length) {
+      Alert.alert(t("세트 수정하기"), t("추가할 단어를 한 개 이상 입력해주세요."));
+      return;
+    }
+
+    const createdAt = Date.now();
+    const existingById = new Map(vocab.map((item) => [item.id, item] as const));
+    const existingByWord = new Map(vocab.map((item) => [item.word, item] as const));
+    const resolvedRows = uniqueRows.map((row, index) => {
+      if (row.id) {
+        const existing = existingById.get(row.id);
+        if (existing) {
+          const ownEditableItem =
+            canModifyRecord(existing, { id: ownerId }) ||
+            (!existing.userId && !existing.ownerId && existing.sourceType === "직접추가");
+          const unchanged =
+            existing.word === row.word &&
+            existing.reading === (row.reading || row.word) &&
+            existing.meaningKo === row.meaningKo;
+          if (ownEditableItem) return { ...row, resolvedId: row.id, isNew: false, shouldUpdate: true };
+          if (unchanged) return { ...row, resolvedId: row.id, isNew: false, shouldUpdate: false };
+          return { ...row, resolvedId: `vocab_custom_${createdAt}_${index}`, isNew: true, shouldUpdate: false };
+        }
+      }
+      const existing = existingByWord.get(row.word);
+      if (existing) return { ...row, resolvedId: existing.id, isNew: false, shouldUpdate: false };
+      return { ...row, resolvedId: `vocab_custom_${createdAt}_${index}`, isNew: true, shouldUpdate: false };
+    });
+    const rowByExistingId = new Map(resolvedRows.filter((row) => !row.isNew && row.shouldUpdate).map((row) => [row.resolvedId, row] as const));
+    const newItems = resolvedRows
+      .filter((row) => row.isNew)
+      .map((row, index) => buildCustomVocabItem(row, row.resolvedId, index))
+      .filter((item): item is VocabItem => Boolean(item));
+    const nextWordIds = uniq(resolvedRows.map((row) => row.resolvedId));
+
+    setVocab((prev) =>
+      newItems.concat(
+        prev.map((item) => {
+          const row = rowByExistingId.get(item.id);
+          if (!row) return item;
+          return {
+            ...item,
+            userId: item.userId || ownerId,
+            ownerId: item.ownerId || ownerId,
+            word: row.word,
+            reading: row.reading || row.word,
+            meaningKo: row.meaningKo,
+            exampleJa: item.sourceType === "직접추가" ? (/[A-Za-z]/.test(row.word) ? `${row.word}: ${row.meaningKo}` : `${row.word}を使った例文をあとで追加できます。`) : item.exampleJa,
+            exampleKo: item.sourceType === "직접추가" ? `${row.meaningKo} 표현의 예문은 나중에 추가할 수 있습니다.` : item.exampleKo,
+          };
+        })
+      )
+    );
+    const editedSet: StudySet = {
+      ...target,
+      title: titleValidation.value,
+      description: sanitizeText(input.description, 180) || target.description,
+      wordIds: nextWordIds,
+      wordCount: nextWordIds.length,
+      weakTypes: target.weakTypes.length ? target.weakTypes : ["직접추가"],
+    };
+    setStudySets((prev) => prev.map((set) => (set.id === setId ? editedSet : set)));
+    setGeneratedSets((prev) => prev.map((set) => (set.id === setId ? editedSet : set)));
+    Alert.alert(t("세트 수정하기"), t("저장했습니다."));
+  }
+
+  function duplicateStudySet(setId: string) {
+    const target = visibleStudySets.find((set) => set.id === setId);
+    if (!target) return;
+    const rows = target.wordIds
+      .map((id) => vocabById.get(id))
+      .filter((item): item is VocabItem => Boolean(item))
+      .map((item) => ({ word: item.word, reading: item.reading, meaningKo: item.meaningKo }));
+    createCustomStudySet({ title: `${target.title} 사본`, rows });
+  }
+
+  function deleteStudySet(setId: string) {
+    const target = studySets.find((set) => set.id === setId);
+    if (!target) return;
+    if (!isEditableStudySet(target)) {
+      Alert.alert(t("세트 지우기"), t("삭제 권한이 없습니다."));
+      return;
+    }
+    const otherSetWordIds = new Set(
+      studySets
+        .filter((set) => set.id !== setId)
+        .flatMap((set) => set.wordIds)
+    );
+    const removableWordIds = new Set(
+      target.wordIds.filter((id) => {
+        const item = vocabById.get(id);
+        return Boolean(
+          item &&
+            item.sourceType === "직접추가" &&
+            canModifyRecord(item, { id: ownerId }) &&
+            !otherSetWordIds.has(id)
+        );
+      })
+    );
+    setStudySets((prev) => prev.filter((set) => set.id !== setId));
+    setGeneratedSets((prev) => prev.filter((set) => set.id !== setId));
+    setUserFolders((prev) => prev.map((folder) => ({ ...folder, setIds: folder.setIds.filter((id) => id !== setId) })));
+    if (removableWordIds.size) {
+      setVocab((prev) => prev.filter((item) => !removableWordIds.has(item.id)));
+      setReviewQueueIds((prev) => prev.filter((id) => !removableWordIds.has(id)));
+    }
+    setSetWordFilter((prev) => (prev?.title === target.title ? null : prev));
+    setOverlay({ kind: "none" });
+    Alert.alert(t("세트 지우기"), t("삭제되었습니다."));
+  }
+
   function createUserFolder(input: { title: string; description: string; setIds?: string[] }) {
-    const title = input.title.trim() || "새 폴더";
+    const titleValidation = validateRequiredText(input.title || "새 폴더", 60, language);
+    if (!titleValidation.ok) {
+      Alert.alert(t("폴더 만들기"), titleValidation.message);
+      return;
+    }
+    const title = titleValidation.value;
     const folder: UserStudyFolder = {
       id: `folder_${Date.now()}`,
+      userId: ownerId,
+      ownerId,
       title,
-      description: input.description.trim() || "학생이 직접 만든 폴더",
+      description: sanitizeText(input.description, 180) || "학생이 직접 만든 폴더",
       setIds: input.setIds ?? [],
       createdAt: Date.now(),
     };
     setUserFolders((prev) => [folder, ...prev]);
-    setStudentTab("library");
+    switchStudentTab("library");
     Alert.alert(t("폴더 생성"), `“${folder.title}”${t("를 만들었습니다.")}`);
   }
 
@@ -1339,6 +2360,8 @@ function AppContent({
         next.unshift({
           ...base,
           id: x.id,
+          userId: ownerId,
+          ownerId,
           word: x.word,
           reading: x.reading,
           meaningKo: x.meaningKo,
@@ -1356,7 +2379,6 @@ function AppContent({
     setReviewQueueIds((prev) => uniq(prev.concat(queuedIds)));
   }
 
-  // Teacher mode currently: show teacher home; detailed class/distribute/status screens will be added next.
   const isTeacher = settings.role === "teacher";
 
   const overlayView = useMemo(() => {
@@ -1375,9 +2397,11 @@ function AppContent({
           onStartFlashcard={(wordIds, title) => openLearn(wordIds, title, "낱말카드")}
           onShowRelated={(wordIds, title) => openLearn(wordIds, title, "낱말카드")}
           onShowSameType={(typeName) => {
-            setStudentTab("vocab");
-            setSearchQuery(typeName);
-            setOverlay({ kind: "none" });
+            runScreenTransition("같은 유형 여는 중", () => {
+              setStudentTab("vocab");
+              setSearchQuery(typeName);
+              setOverlay({ kind: "none" });
+            }, { showLoading: true });
           }}
         />
       );
@@ -1393,15 +2417,36 @@ function AppContent({
           onBack={() => setOverlay({ kind: "none" })}
           onOpenHighlight={() => setHighlightOpen(true)}
           onOpenWord={(id) => openWord(id)}
+          canEdit={isEditableStudySet(set)}
+          onSaveSetEdits={saveStudySetEdits}
+          onDuplicateSet={duplicateStudySet}
+          onDeleteSet={deleteStudySet}
+          onExtractImportFile={async (file) => {
+            if (isGuest) {
+              await new Promise((resolve) => setTimeout(resolve, 500));
+              return [
+                { word: "残る", reading: "のこる", meaningKo: "남다" },
+                { word: "増える", reading: "ふえる", meaningKo: "늘다" },
+                { word: "割れる", reading: "われる", meaningKo: "깨지다" },
+              ];
+            }
+            return (await extractHighlightWordsFromFile(file)).map((item) => ({
+              word: item.word,
+              reading: item.reading,
+              meaningKo: item.meaningKo,
+            }));
+          }}
           onOpenWordListForSet={(setId) => {
             const set2 = visibleStudySets.find((s) => s.id === setId);
             if (!set2) return;
-            setStudentTab("vocab");
-            setSearchQuery("");
-            setSetWordFilter({ title: set2.title, wordIds: set2.wordIds });
-            setOverlay({ kind: "none" });
+            runScreenTransition("세트 단어 여는 중", () => {
+              setStudentTab("vocab");
+              setSearchQuery("");
+              setSetWordFilter({ title: set2.title, wordIds: set2.wordIds });
+              setOverlay({ kind: "none" });
+            }, { showLoading: set2.wordIds.length > 80 });
           }}
-          onStartFlashcard={(ids, title) => openLearn(ids, title, "낱말카드")}
+          onStartFlashcard={(ids, title) => openLearn(ids, title, "낱말카드", set.id)}
           onStartLearn={(ids, title) => {
             const mode: LearnMode =
               settings.studyStyle === "예문중심형"
@@ -1411,9 +2456,9 @@ function AppContent({
                 : settings.studyStyle === "기출빈도형"
                 ? "뜻 맞히기"
                 : "낱말카드";
-            openLearn(ids, title, mode);
+            openLearn(ids, title, mode, set.id);
           }}
-          onStartTest={(ids, title) => openLearn(ids, `${title} (테스트 데모)`, "뜻 맞히기")}
+          onStartTest={(ids, title) => openLearn(ids, `${title} (테스트 데모)`, "뜻 맞히기", set.id)}
           onStartReview={(ids, title) => {
             const actualIds = ids.filter((id) => actualWrongReviewIds.includes(id));
             if (!actualIds.length) {
@@ -1426,20 +2471,61 @@ function AppContent({
       );
     }
 
+    if (overlay.kind === "folder") {
+      const folder = userFolders.find((item) => item.id === overlay.folderId);
+      if (!folder) return null;
+      return (
+        <UserFolderDetailScreen
+          folder={folder}
+          studySets={visibleStudySets}
+          onBack={() => setOverlay({ kind: "none" })}
+          onOpenSet={(id) => openSet(id)}
+        />
+      );
+    }
+
     if (overlay.kind === "learn") {
       const words = overlay.wordIds.map((id) => vocabById.get(id)).filter(Boolean) as VocabItem[];
+      const sessionKey = learnSessionKey(overlay.title, overlay.wordIds);
+      const sourceSetTitle = overlay.sourceSetId
+        ? sourceSetTitleById.get(overlay.sourceSetId) || overlay.title
+        : overlay.title;
+      const progressByMode = LEARN_MODES.reduce<Partial<Record<LearnMode, LearnSessionProgress>>>((acc, learnMode) => {
+        const saved = learnProgressBySession[learnProgressKey(sessionKey, learnMode)];
+        const legacy = learnProgressBySession[sessionKey];
+        const progress = saved || (legacy?.activeMode === learnMode ? legacy : undefined);
+        if (progress) acc[learnMode] = progress;
+        return acc;
+      }, {});
       return (
         <LearnScreen
+          sessionKey={sessionKey}
           title={overlay.title}
           mode={overlay.mode}
           studyStyle={settings.studyStyle}
           words={words}
+          sourceSetId={overlay.sourceSetId}
+          sourceSetTitle={sourceSetTitle}
+          totalWordCount={overlay.wordIds.length}
+          initialProgress={
+            learnProgressBySession[learnProgressKey(sessionKey, overlay.mode)] ||
+            (learnProgressBySession[sessionKey]?.activeMode === overlay.mode ? learnProgressBySession[sessionKey] : undefined)
+          }
+          initialProgressByMode={progressByMode}
+          wrongReviewWordIds={actualWrongReviewIds}
+          onProgressChange={(progress) => {
+            updateLearnProgress(sessionKey, progress);
+            updateStudySetProgressFromLearn(overlay.sourceSetId, progress);
+          }}
           onBack={() => setOverlay({ kind: "none" })}
           onGainXP={(xp) => gainXP(xp)}
           onUpdateWordStats={(wordId, delta) => updateWordStats(wordId, delta)}
           onMarkStudied={(wordId) => markStudied(wordId)}
+          onMarkLearningCard={(wordId, source) => markLearningCard(wordId, source)}
+          onResolveLearningCard={(wordId) => resolveLearningCard(wordId)}
           onToggleFavorite={(wordId) => toggleFavorite(wordId)}
           onRecordResult={recordLearningResult}
+          onCompleteSession={recordCompletedStudySession}
         />
       );
     }
@@ -1448,11 +2534,10 @@ function AppContent({
       return (
         <DiagnosticScreen
           vocab={vocab}
+          learningCourse={settings.learningCourse}
           onBack={() => setOverlay({ kind: "none" })}
           onComplete={(res, wrongIds) => {
             onDiagnosticComplete(res, wrongIds);
-            setOverlay({ kind: "none" });
-            Alert.alert(t("진단 완료"), `${t("정답률")} ${res.accuracy}%`);
           }}
           onCreateWeakSet={(weakTypes, wordIds) => createWeakSetFromDiagnostic(weakTypes, wordIds)}
           latestResult={latestDiagnostic}
@@ -1495,7 +2580,7 @@ function AppContent({
           vocabById={vocabById}
           studyStyle={settings.studyStyle}
           onBack={() => setOverlay({ kind: "none" })}
-          onStartHomeworkLearn={(ids, title) => openLearn(ids, title, "낱말카드")}
+          onStartHomeworkLearn={(ids, title, mode) => openLearn(ids, title, mode)}
           onMarkHomeworkDone={(assignmentId) => {
             setAssignments((prev) =>
               prev.map((x) => {
@@ -1554,7 +2639,7 @@ function AppContent({
           prefillClassId={overlay.classId}
           onBack={() => setOverlay({ kind: "none" })}
           onAssign={(a) => {
-            setAssignments((prev) => [a, ...prev]);
+            setAssignments((prev) => [{ ...a, userId: ownerId, ownerId }, ...prev]);
             setOverlay({ kind: "none" });
           }}
         />
@@ -1596,6 +2681,7 @@ function AppContent({
     vocab,
     studySets,
     visibleStudySets,
+    sourceSetTitleById,
     settings.studyStyle,
     settings,
     studiedTodayIds,
@@ -1620,12 +2706,27 @@ function AppContent({
           dailyWordGoal={settings.dailyWordGoal}
           studiedTodayCount={studiedTodayCount}
           streakDays={streakDays}
+          longestStreak={attendance.longestStreak}
+          attendanceDates={attendance.checkedDates}
           totalXP={totalXP}
           storeXP={storeXP}
           rewardItems={rewardStoreItems}
           redeemedRewardIds={redeemedRewardIds}
           learningTodayQuestionCount={learningTodayQuestionCount}
           learningAccuracy={learningAccuracy}
+          todayStudySeconds={todayStudySeconds}
+          todayStudyBonusXP={todayStudyBonusXP}
+          todayStudyCourseSummaries={todayStudyCourseSummaries}
+          recentLearningResume={
+            recentLearningResume
+              ? {
+                  title: recentLearningResume.title,
+                  mode: recentLearningResume.mode,
+                  progressLabel: recentLearningResume.progressLabel,
+                  progressPct: recentLearningResume.progressPct,
+                }
+              : null
+          }
           recentWrongLearningRecords={recentWrongLearningRecords}
           learningRecordWordLabels={learningRecordWordLabels}
           learningWeakTop3={learningWeakTop3}
@@ -1637,19 +2738,34 @@ function AppContent({
           recentWrongAttemptCount7d={recentWrongAttemptCount7d}
           highlightWordCount={highlightWordCount}
           weakTop3={weakTop3}
+          personalSets={personalHomeSets}
+          userFolders={userFolders}
           recommendedSets={recommendedSets}
           recentlyStudied={recentlyStudied}
           classHomeworkSummary={classHomeworkSummary}
           onGoVocab={goVocabWithSearch}
           onStartTodayLearn={startTodayLearn}
+          onResumeRecentLearning={() => {
+            if (!recentLearningResume) {
+              startTodayLearn();
+              return;
+            }
+            openLearn(
+              recentLearningResume.wordIds,
+              recentLearningResume.title,
+              recentLearningResume.mode
+            );
+          }}
           onStartWrongReview={startWrongReview}
           onStartDiagnostic={openDiagnostic}
           onOpenHighlight={() => setHighlightOpen(true)}
           onOpenWord={(id) => openWord(id)}
           onOpenSet={(id) => openSet(id)}
+          onOpenUserFolder={(id) => openUserFolder(id)}
           onOpenClass={openClass}
           onOpenReport={openReport}
-          onOpenLibrary={() => setStudentTab("library")}
+          onOpenLibrary={() => switchStudentTab("library")}
+          onOpenMy={() => switchStudentTab("my")}
           onExchangeReward={exchangeReward}
           onWeakTypeReview={(typeName) => {
             const ids = vocab.filter((v) => v.questionTypes.includes(typeName)).slice(0, 80).map((v) => v.id);
@@ -1666,6 +2782,7 @@ function AppContent({
           userFolders={userFolders}
           initialQuery={searchQuery}
           defaultSort={defaultVocabSort}
+          learningCourse={settings.learningCourse}
           wrongWordStats={wrongWordStats}
           onOpenWord={(id) => openWord(id)}
           onOpenSet={(id) => openSet(id)}
@@ -1675,6 +2792,7 @@ function AppContent({
           onToggleFavorite={(id) => toggleFavorite(id)}
           onLookupDictionary={lookupDictionaryWord}
           onSaveCuriosityWord={saveCuriosityWord}
+          onChangeLearningCourse={changeLearningCourse}
         />
       ) : null}
 
@@ -1685,9 +2803,10 @@ function AppContent({
           userFolders={userFolders}
           initialQuery={searchQuery}
           defaultSort={defaultVocabSort}
+          learningCourse={settings.learningCourse}
           wrongWordStats={wrongWordStats}
           title="라이브러리"
-          subtitle="세트와 폴더에서 바로 학습을 시작하세요."
+          subtitle="공식 학습 세트에서 바로 학습을 시작하세요."
           initialMode="세트"
           lockMode
           onOpenWord={(id) => openWord(id)}
@@ -1696,6 +2815,7 @@ function AppContent({
           onToggleFavorite={(id) => toggleFavorite(id)}
           onLookupDictionary={lookupDictionaryWord}
           onSaveCuriosityWord={saveCuriosityWord}
+          onChangeLearningCourse={changeLearningCourse}
         />
       ) : null}
 
@@ -1704,15 +2824,13 @@ function AppContent({
           studentName={displayName}
           settings={settings}
           setSettings={setSettings}
-          onOpenHighlight={() => setHighlightOpen(true)}
-          onOpenDiagnostic={openDiagnostic}
-          onOpenReport={openReport}
-          onOpenClass={openClass}
+          onRoleChange={switchUserRole}
+          teacherSummary={teacherAccountSummary}
           onSignOut={signOut}
         />
       ) : null}
 
-      <StudentBottomNav tab={studentTab} setTab={setStudentTab} onCreatePress={() => setCreateHubOpen(true)} />
+      <StudentBottomNav tab={studentTab} setTab={switchStudentTab} onCreatePress={() => setCreateHubOpen(true)} />
     </>
   );
 
@@ -1723,9 +2841,9 @@ function AppContent({
           classes={EJUEDU_CLASSES}
           students={EJUEDU_STUDENTS}
           assignments={assignments}
-          onGoCreateAssignment={() => setTeacherTab("distribute")}
-          onGoClasses={() => setTeacherTab("classes")}
-          onGoStatus={() => setTeacherTab("status")}
+          onGoCreateAssignment={() => switchTeacherTab("distribute")}
+          onGoClasses={() => switchTeacherTab("classes")}
+          onGoStatus={() => switchTeacherTab("status")}
         />
       ) : null}
       {teacherTab === "classes" ? (
@@ -1743,8 +2861,8 @@ function AppContent({
           studySets={studySets}
           vocab={vocab}
           prefillClassId={null}
-          onBack={() => setTeacherTab("home")}
-          onAssign={(a) => setAssignments((prev) => [a, ...prev])}
+          onBack={() => switchTeacherTab("home")}
+          onAssign={(a) => setAssignments((prev) => [{ ...a, userId: ownerId, ownerId }, ...prev])}
         />
       ) : null}
 
@@ -1762,16 +2880,15 @@ function AppContent({
           studentName={displayName}
           settings={settings}
           setSettings={setSettings}
-          onOpenHighlight={() => setHighlightOpen(true)}
-          onOpenDiagnostic={() => openDiagnostic()}
-          onOpenReport={() => openReport()}
-          onOpenClass={() => {
-            setTeacherTab("classes");
-          }}
+          onRoleChange={switchUserRole}
+          teacherSummary={teacherAccountSummary}
+          onTeacherOpenClasses={() => switchTeacherTab("classes")}
+          onTeacherOpenDistribute={() => switchTeacherTab("distribute")}
+          onTeacherOpenStatus={() => switchTeacherTab("status")}
           onSignOut={signOut}
         />
       ) : null}
-      <TeacherBottomNav tab={teacherTab} setTab={setTeacherTab} />
+      <TeacherBottomNav tab={teacherTab} setTab={switchTeacherTab} />
     </>
   );
 
@@ -1814,7 +2931,7 @@ function AppContent({
           onCreate={(input) => {
             createCustomStudySet(input);
             setQuickCreateSetOpen(false);
-            setStudentTab("library");
+            switchStudentTab("library");
           }}
         />
 
@@ -1827,8 +2944,28 @@ function AppContent({
             setFolderCreateOpen(false);
           }}
         />
+
+        {transitionBlocking ? <ScreenTransitionOverlay label={transitionLabel} /> : null}
       </View>
     </SafeAreaView>
+  );
+}
+
+function ScreenTransitionOverlay({ label }: { label: string | null }) {
+  const { t } = useI18n();
+  if (!label) {
+    return <View style={styles.transitionTapShield} pointerEvents="auto" />;
+  }
+  return (
+    <View style={styles.transitionOverlay} pointerEvents="auto">
+      <View style={styles.transitionCard}>
+        <ActivityIndicator color={COLORS.text} />
+        <View>
+          <Text style={styles.transitionTitle}>{t("로딩 중...")}</Text>
+          <Text style={styles.transitionText}>{t(label)}</Text>
+        </View>
+      </View>
+    </View>
   );
 }
 
@@ -1897,10 +3034,13 @@ function NavItem({
       style={({ pressed }) => [
         styles.navPressable,
         active && styles.navActive,
-        pressed && { opacity: 0.9 },
+        pressed && PRESS_FEEDBACK.nav,
       ]}
       onPress={onPress}
       hitSlop={6}
+      accessibilityRole="tab"
+      accessibilityLabel={t(label)}
+      accessibilityState={{ selected: active }}
     >
       <View style={{ alignItems: "center" }}>
         <View style={[styles.navIconCircle, active && styles.navIconCircleActive]}>
@@ -1942,10 +3082,12 @@ function CreateNavItem({ label, onPress }: { icon: NavIconName; label: string; o
       style={({ pressed }) => [
         styles.navPressable,
         styles.createNavPressable,
-        pressed && { opacity: 0.9 },
+        pressed && PRESS_FEEDBACK.nav,
       ]}
       onPress={onPress}
       hitSlop={8}
+      accessibilityRole="button"
+      accessibilityLabel={t(label)}
     >
       <View style={{ alignItems: "center" }}>
         <View style={styles.createNavCircle}>
@@ -1973,13 +3115,13 @@ function CreateHubSheet({
   const { t } = useI18n();
   return (
     <Modal visible={visible} transparent animationType="fade">
-      <Pressable style={styles.createDim} onPress={close}>
-        <Pressable style={styles.createSheet} onPress={(event) => event.stopPropagation()}>
+      <Pressable style={styles.createDim} onPress={close} accessibilityRole="button" accessibilityLabel={t("닫기")}>
+        <Pressable style={styles.createSheet} onPress={(event) => event.stopPropagation()} accessibilityRole="menu">
           <View style={styles.sheetHandle} />
-          <CreateActionRow icon="albums-outline" activeIcon="albums" title="낱말카드 세트" subtitle="단어·독음·뜻을 붙여넣어 만들기" onPress={onCreateSet} active />
+          <CreateActionRow icon="albums-outline" activeIcon="albums" title="낱말카드 세트" subtitle="한 장씩 추가하거나 붙여넣기" onPress={onCreateSet} active />
           <CreateActionRow icon="folder-outline" activeIcon="folder" title="폴더" subtitle="내 단어장을 묶을 폴더 만들기" onPress={onCreateFolder} />
           <CreateActionRow icon="people-outline" activeIcon="people" title="클래스" subtitle="연결된 클래스와 과제 보기" onPress={onOpenClass} />
-          <Pressable style={({ pressed }) => [styles.sheetCancel, pressed && { opacity: 0.9 }]} onPress={close}>
+          <Pressable style={({ pressed }) => [styles.sheetCancel, pressed && PRESS_FEEDBACK.soft]} onPress={close} accessibilityRole="button" accessibilityLabel={t("취소")}>
             <Text style={styles.sheetCancelText}>{t("취소")}</Text>
           </Pressable>
         </Pressable>
@@ -2005,7 +3147,7 @@ function CreateActionRow({
 }) {
   const { t } = useI18n();
   return (
-    <Pressable style={({ pressed }) => [styles.createActionRow, pressed && { opacity: 0.9 }]} onPress={onPress}>
+    <Pressable style={({ pressed }) => [styles.createActionRow, pressed && PRESS_FEEDBACK.soft]} onPress={onPress} accessibilityRole="button" accessibilityLabel={t(title)}>
       <View style={[styles.createActionIcon, active && styles.createActionIconActive]}>
         <Ionicons
           name={active && activeIcon ? activeIcon : icon}
@@ -2031,24 +3173,86 @@ function QuickCreateSetModal({
   close: () => void;
   onCreate: (input: { title: string; rows: Array<{ word: string; reading: string; meaningKo: string }> }) => void;
 }) {
-  const { t, tm } = useI18n();
+  const { t, tm, language } = useI18n();
   const [title, setTitle] = useState("");
   const [descriptionOpen, setDescriptionOpen] = useState(false);
   const [description, setDescription] = useState("");
   const [rawText, setRawText] = useState("");
-  const rows = useMemo(() => parseCreateSetRows(rawText), [rawText]);
-  const exampleText = ["少子化\tしょうしか\t저출산", "景気\tけいき\t경기", "市場\tしじょう\t시장"].join("\n");
+  const [manualRows, setManualRows] = useState<Array<{ word: string; reading: string; meaningKo: string }>>([]);
+  const [wordInput, setWordInput] = useState("");
+  const [readingInput, setReadingInput] = useState("");
+  const [meaningInput, setMeaningInput] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const bulkRows = useMemo(() => parseCreateSetRows(rawText), [rawText]);
+  const rows = useMemo(() => manualRows.concat(bulkRows), [bulkRows, manualRows]);
+  const exampleText = [
+    "product-market fit\tPMF\t제품-시장 적합성",
+    "runway\trunway\t남은 운영 가능 기간",
+    "お世話になっております\tおせわになっております\t비즈니스 메일 첫인사",
+  ].join("\n");
 
   function submit() {
+    if (rawText.trim()) {
+      const bulkValidation = validateBulkScheduleImportText(rawText, language);
+      if (!bulkValidation.ok) {
+        Alert.alert(t("세트 만들기"), bulkValidation.message);
+        return;
+      }
+    }
     if (!rows.length) {
-      Alert.alert(t("세트 만들기"), t("Quizlet처럼 한 줄에 단어, 독음, 뜻을 입력해주세요."));
+      Alert.alert(t("세트 만들기"), t("단어 카드를 한 장 이상 추가해주세요."));
       return;
     }
-    onCreate({ title: title.trim() || "내 단어장", rows });
+    const titleValidation = validateRequiredText(title || "내 단어장", 60, language);
+    if (!titleValidation.ok) {
+      Alert.alert(t("세트 만들기"), titleValidation.message);
+      return;
+    }
+    onCreate({ title: titleValidation.value, rows });
     setTitle("");
     setDescription("");
     setDescriptionOpen(false);
     setRawText("");
+    setManualRows([]);
+    setWordInput("");
+    setReadingInput("");
+    setMeaningInput("");
+    setEditingIndex(null);
+  }
+
+  function addOrUpdateManualRow() {
+    const wordValidation = validateRequiredText(wordInput, 40, language);
+    if (!wordValidation.ok) {
+      Alert.alert(t("단어 추가"), wordValidation.message);
+      return;
+    }
+    const meaningValidation = validateRequiredText(meaningInput, 120, language);
+    if (!meaningValidation.ok) {
+      Alert.alert(t("단어 추가"), meaningValidation.message);
+      return;
+    }
+    const nextRow = {
+      word: wordValidation.value,
+      reading: sanitizeText(readingInput, 60) || wordValidation.value,
+      meaningKo: meaningValidation.value,
+    };
+    setManualRows((prev) => {
+      if (editingIndex === null) return prev.concat(nextRow);
+      return prev.map((row, index) => (index === editingIndex ? nextRow : row));
+    });
+    setWordInput("");
+    setReadingInput("");
+    setMeaningInput("");
+    setEditingIndex(null);
+  }
+
+  function editManualRow(index: number) {
+    const row = manualRows[index];
+    if (!row) return;
+    setWordInput(row.word);
+    setReadingInput(row.reading);
+    setMeaningInput(row.meaningKo);
+    setEditingIndex(index);
   }
 
   return (
@@ -2056,15 +3260,15 @@ function QuickCreateSetModal({
       <SafeAreaView style={styles.createModalSafe}>
         <ScrollView style={styles.createModalScreen} contentContainerStyle={styles.createModalScroll}>
           <View style={styles.createModalTop}>
-            <Pressable style={({ pressed }) => [styles.roundClose, pressed && { opacity: 0.9 }]} onPress={close}>
+            <Pressable style={({ pressed }) => [styles.roundClose, pressed && PRESS_FEEDBACK.soft]} onPress={close} accessibilityRole="button" accessibilityLabel={t("닫기")}>
               <Text style={styles.roundCloseText}>×</Text>
             </Pressable>
             <Text style={styles.createModalTitle}>{t("낱말카드 세트 만들기")}</Text>
             <View style={styles.createTopActions}>
-              <Pressable style={({ pressed }) => [styles.roundSmall, pressed && { opacity: 0.9 }]} onPress={() => Alert.alert(t("설정"), t("언어와 공개 범위는 만든 뒤에도 수정할 수 있습니다."))}>
+              <Pressable style={({ pressed }) => [styles.roundSmall, pressed && PRESS_FEEDBACK.soft]} onPress={() => Alert.alert(t("설정"), t("언어와 공개 범위는 만든 뒤에도 수정할 수 있습니다."))} accessibilityRole="button" accessibilityLabel={t("설정")}>
                 <Text style={styles.roundSmallText}>⚙</Text>
               </Pressable>
-              <Pressable style={({ pressed }) => [styles.roundSmall, pressed && { opacity: 0.9 }]} onPress={submit}>
+              <Pressable style={({ pressed }) => [styles.roundSmall, pressed && PRESS_FEEDBACK.soft]} onPress={submit} accessibilityRole="button" accessibilityLabel={t("세트 만들기")}>
                 <Text style={styles.roundSmallText}>✓</Text>
               </Pressable>
             </View>
@@ -2073,6 +3277,7 @@ function QuickCreateSetModal({
           <TextInput
             value={title}
             onChangeText={setTitle}
+            maxLength={60}
             placeholder={t("과목, 주제, 학년, 시험 등")}
             placeholderTextColor="#9EA4C8"
             style={styles.titleLineInput}
@@ -2080,10 +3285,7 @@ function QuickCreateSetModal({
           <Text style={styles.lineLabel}>{t("제목")}</Text>
 
           <View style={styles.createToolbar}>
-            <Pressable style={({ pressed }) => [styles.toolbarBtn, pressed && { opacity: 0.9 }]} onPress={() => Alert.alert(t("문서 스캔"), t("문서 스캔 데모: 실제 OCR은 백엔드 연결 후 지원됩니다."))}>
-              <Text style={styles.toolbarBtnText}>▣ {t("문서 스캔")}</Text>
-            </Pressable>
-            <Pressable style={({ pressed }) => [styles.toolbarBtn, pressed && { opacity: 0.9 }]} onPress={() => setDescriptionOpen((p) => !p)}>
+            <Pressable style={({ pressed }) => [styles.toolbarBtn, pressed && PRESS_FEEDBACK.soft]} onPress={() => setDescriptionOpen((p) => !p)} accessibilityRole="button" accessibilityLabel={t("설명")}>
               <Text style={styles.toolbarBtnText}>+ {t("설명")}</Text>
             </Pressable>
           </View>
@@ -2092,32 +3294,95 @@ function QuickCreateSetModal({
             <TextInput
               value={description}
               onChangeText={setDescription}
+              maxLength={180}
               placeholder={t("설명을 입력하세요.")}
               placeholderTextColor="#7B82A6"
               style={styles.descriptionInput}
             />
           ) : null}
 
-          <Text style={styles.createHint}>{t("형식: 단어 [탭/쉼표] 독음 [탭/쉼표] 뜻")}</Text>
+          <Card style={styles.manualCardEditor}>
+            <Text style={styles.createHint}>{t("카드 한 장씩 추가")}</Text>
+            <TextInput
+              value={wordInput}
+              onChangeText={setWordInput}
+              maxLength={40}
+              placeholder={t("단어/표현")}
+              placeholderTextColor="#6F769B"
+              style={styles.manualInput}
+            />
+            <TextInput
+              value={readingInput}
+              onChangeText={setReadingInput}
+              maxLength={60}
+              placeholder={t("읽는 법 또는 약어")}
+              placeholderTextColor="#6F769B"
+              style={styles.manualInput}
+            />
+            <TextInput
+              value={meaningInput}
+              onChangeText={setMeaningInput}
+              maxLength={120}
+              placeholder={t("뜻")}
+              placeholderTextColor="#6F769B"
+              style={styles.manualInput}
+            />
+            <Row style={{ marginTop: 10 }}>
+              <Pressable style={({ pressed }) => [styles.secondaryBtn, { flex: 1 }, pressed && PRESS_FEEDBACK.soft]} onPress={addOrUpdateManualRow}>
+                <Text style={styles.secondaryBtnText}>{t(editingIndex === null ? "카드 추가" : "수정 저장")}</Text>
+              </Pressable>
+              {editingIndex !== null ? (
+                <Pressable
+                  style={({ pressed }) => [styles.secondaryBtn, { flex: 1 }, pressed && PRESS_FEEDBACK.soft]}
+                  onPress={() => {
+                    setWordInput("");
+                    setReadingInput("");
+                    setMeaningInput("");
+                    setEditingIndex(null);
+                  }}
+                >
+                  <Text style={styles.secondaryBtnText}>{t("취소")}</Text>
+                </Pressable>
+              ) : null}
+            </Row>
+          </Card>
+
+          <Text style={styles.createHint}>{t("형식: 단어/표현 [탭/쉼표] 읽는 법 [탭/쉼표] 뜻")}</Text>
           <TextInput
             value={rawText}
             onChangeText={setRawText}
+            maxLength={12000}
             multiline
             textAlignVertical="top"
-            placeholder={"少子化\tしょうしか\t저출산\n景気\tけいき\t경기"}
+            placeholder={"product-market fit\tPMF\t제품-시장 적합성\nお世話になっております\tおせわになっております\t비즈니스 메일 첫인사"}
             placeholderTextColor="#6F769B"
             style={styles.quizletBulkInput}
           />
 
           <View style={styles.createBottomBar}>
-            <Pressable style={({ pressed }) => [styles.bottomTool, pressed && { opacity: 0.9 }]} onPress={() => setRawText(exampleText)}>
+            <Pressable style={({ pressed }) => [styles.bottomTool, pressed && PRESS_FEEDBACK.soft]} onPress={() => setRawText(exampleText)} accessibilityRole="button" accessibilityLabel={t("예시 넣기")}>
               <Text style={styles.bottomToolText}>＋ {t("예시 넣기")}</Text>
             </Pressable>
             <Text style={styles.previewCount}>{t("미리보기")} {rows.length}{t("개")}</Text>
           </View>
 
-          {rows.slice(0, 4).map((row, idx) => (
+          {manualRows.map((row, idx) => (
             <View key={`${row.word}_${idx}`} style={styles.quickPreviewRow}>
+              <Text style={styles.quickPreviewWord}>{row.word}</Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.quickPreviewMeta}>{row.reading} · {tm(row.meaningKo)}</Text>
+              </View>
+              <Pressable onPress={() => editManualRow(idx)} hitSlop={8}>
+                <Text style={styles.quickRowAction}>{t("수정")}</Text>
+              </Pressable>
+              <Pressable onPress={() => setManualRows((prev) => prev.filter((_, rowIndex) => rowIndex !== idx))} hitSlop={8}>
+                <Text style={styles.quickRowDanger}>{t("삭제")}</Text>
+              </Pressable>
+            </View>
+          ))}
+
+          {bulkRows.slice(0, 4).map((row, idx) => (
+            <View key={`bulk_${row.word}_${idx}`} style={styles.quickPreviewRow}>
               <Text style={styles.quickPreviewWord}>{row.word}</Text>
               <Text style={styles.quickPreviewMeta}>{row.reading} · {tm(row.meaningKo)}</Text>
             </View>
@@ -2139,7 +3404,7 @@ function CreateFolderModal({
   studySets: StudySet[];
   onCreate: (input: { title: string; description: string; setIds?: string[] }) => void;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [selectedSetIds, setSelectedSetIds] = useState<string[]>([]);
@@ -2150,7 +3415,12 @@ function CreateFolderModal({
   }
 
   function submit() {
-    onCreate({ title, description, setIds: selectedSetIds });
+    const titleValidation = validateRequiredText(title || "새 폴더", 60, language);
+    if (!titleValidation.ok) {
+      Alert.alert(t("폴더 만들기"), titleValidation.message);
+      return;
+    }
+    onCreate({ title: titleValidation.value, description: sanitizeText(description, 180), setIds: selectedSetIds });
     setTitle("");
     setDescription("");
     setSelectedSetIds([]);
@@ -2161,17 +3431,17 @@ function CreateFolderModal({
       <SafeAreaView style={styles.createModalSafe}>
         <ScrollView style={styles.createModalScreen} contentContainerStyle={styles.createModalScroll}>
           <View style={styles.createModalTop}>
-            <Pressable style={({ pressed }) => [styles.roundClose, pressed && { opacity: 0.9 }]} onPress={close}>
+            <Pressable style={({ pressed }) => [styles.roundClose, pressed && { opacity: 0.9 }]} onPress={close} accessibilityRole="button" accessibilityLabel={t("닫기")}>
               <Text style={styles.roundCloseText}>×</Text>
             </Pressable>
             <Text style={styles.createModalTitle}>{t("폴더 만들기")}</Text>
-            <Pressable style={({ pressed }) => [styles.roundSmall, pressed && { opacity: 0.9 }]} onPress={submit}>
+            <Pressable style={({ pressed }) => [styles.roundSmall, pressed && { opacity: 0.9 }]} onPress={submit} accessibilityRole="button" accessibilityLabel={t("폴더 만들기")}>
               <Text style={styles.roundSmallText}>✓</Text>
             </Pressable>
           </View>
-          <TextInput value={title} onChangeText={setTitle} placeholder={t("예: 종과 경제")} placeholderTextColor="#9EA4C8" style={styles.titleLineInput} />
+          <TextInput value={title} onChangeText={setTitle} maxLength={60} placeholder={t("예: 종과 경제")} placeholderTextColor="#9EA4C8" style={styles.titleLineInput} />
           <Text style={styles.lineLabel}>{t("폴더 이름")}</Text>
-          <TextInput value={description} onChangeText={setDescription} placeholder={t("설명을 입력하세요.")} placeholderTextColor="#7B82A6" style={styles.descriptionInput} />
+          <TextInput value={description} onChangeText={setDescription} maxLength={180} placeholder={t("설명을 입력하세요.")} placeholderTextColor="#7B82A6" style={styles.descriptionInput} />
           <Text style={styles.createHint}>{t("처음 담을 세트")}</Text>
           {folderCandidates.map((set) => {
             const selected = selectedSetIds.includes(set.id);
@@ -2193,7 +3463,7 @@ function CreateFolderModal({
               </Pressable>
             );
           })}
-          <Text style={styles.createHint}>{t("만든 폴더는 단어장 > 세트 > 개인·과제에 표시됩니다.")}</Text>
+          <Text style={styles.createHint}>{t("만든 폴더는 홈 > 개인 학습에 표시됩니다.")}</Text>
         </ScrollView>
       </SafeAreaView>
     </Modal>
@@ -2247,6 +3517,39 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     backgroundColor: COLORS.bg,
   },
+  transitionTapShield: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 79,
+    backgroundColor: "transparent",
+  },
+  transitionOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 80,
+    backgroundColor: "rgba(7,8,35,0.42)",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 24,
+  },
+  transitionCard: {
+    minWidth: 168,
+    minHeight: 72,
+    borderRadius: 22,
+    backgroundColor: "rgba(24,28,68,0.96)",
+    borderWidth: 1,
+    borderColor: COLORS.lineSoft,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 12,
+    paddingHorizontal: 18,
+    shadowColor: "#000",
+    shadowOpacity: 0.38,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12,
+  },
+  transitionTitle: { color: COLORS.text, fontSize: TYPO.body, lineHeight: TYPO.bodyLine, fontWeight: "900" },
+  transitionText: { color: COLORS.muted, fontSize: TYPO.small, lineHeight: TYPO.smallLine, fontWeight: "800", marginTop: 1 },
   bottomNav: {
     position: "absolute",
     left: 14,
@@ -2551,6 +3854,18 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   createHint: { color: COLORS.muted, fontSize: TYPO.small, lineHeight: TYPO.smallLine, marginBottom: 8, fontWeight: "500" },
+  manualCardEditor: { marginBottom: 14, backgroundColor: "#171B3E" },
+  manualInput: {
+    minHeight: 50,
+    borderRadius: 14,
+    backgroundColor: COLORS.field,
+    borderWidth: 1,
+    borderColor: COLORS.line,
+    color: COLORS.text,
+    paddingHorizontal: 12,
+    fontWeight: "700",
+    marginTop: 8,
+  },
   quizletBulkInput: {
     minHeight: 260,
     borderRadius: 0,
@@ -2584,9 +3899,16 @@ const styles = StyleSheet.create({
     borderColor: COLORS.line,
     padding: 12,
     marginBottom: 8,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
   },
   quickPreviewWord: { color: COLORS.text, fontSize: TYPO.h3, lineHeight: TYPO.h3Line, fontWeight: "800" },
   quickPreviewMeta: { color: COLORS.muted, fontWeight: "600", fontSize: TYPO.small, lineHeight: TYPO.smallLine, marginTop: 3 },
+  quickRowAction: { color: "#BFC4FF", fontWeight: "900", fontSize: TYPO.small },
+  quickRowDanger: { color: COLORS.red, fontWeight: "900", fontSize: TYPO.small },
+  secondaryBtn: { minHeight: 50, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.card2, justifyContent: "center", alignItems: "center" },
+  secondaryBtnText: { color: COLORS.text, fontWeight: "900" },
   folderSelectRow: {
     minHeight: 64,
     borderRadius: 18,

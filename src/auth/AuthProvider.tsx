@@ -1,6 +1,14 @@
 import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { Session, User } from "@supabase/supabase-js";
 import { isSupabaseConfigured, supabase } from "../lib/supabase";
+import { logInternalError } from "../utils/errors";
+
+declare const process:
+  {
+    env: {
+      EXPO_PUBLIC_SITE_URL?: string;
+    };
+  };
 
 type AuthContextValue = {
   loading: boolean;
@@ -21,12 +29,37 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const PRODUCTION_SITE_URL = "https://vocarush.vercel.app/";
+
+function normalizeRedirectUrl(value?: string) {
+  if (!value) return undefined;
+  try {
+    const url = new URL(value);
+    return url.toString().endsWith("/") ? url.toString() : `${url.toString()}/`;
+  } catch {
+    return undefined;
+  }
+}
+
+function isLocalRedirectOrigin(origin?: string) {
+  if (!origin) return false;
+  try {
+    const { hostname } = new URL(origin);
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
 
 function authRedirectUrl() {
+  const configuredSiteUrl = normalizeRedirectUrl(process.env.EXPO_PUBLIC_SITE_URL);
+  if (configuredSiteUrl) return configuredSiteUrl;
+
   if (typeof window !== "undefined" && window.location?.origin) {
+    if (isLocalRedirectOrigin(window.location.origin)) return PRODUCTION_SITE_URL;
     return `${window.location.origin}/`;
   }
-  return undefined;
+  return PRODUCTION_SITE_URL;
 }
 
 function cleanAuthHashFromUrl() {
@@ -150,16 +183,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (error) throw error;
       },
       async signOut() {
-        if (isGuest) {
-          setIsGuest(false);
+        setIsGuest(false);
+        setSession(null);
+
+        if (!supabase || isGuest) {
+          cleanAuthHashFromUrl();
           return;
         }
 
-        if (supabase) {
+        try {
           const { error } = await supabase.auth.signOut();
           if (error) throw error;
+        } catch (error) {
+          logInternalError(error, "AuthProvider.signOut");
+          try {
+            await supabase.auth.signOut({ scope: "local" });
+          } catch (localError) {
+            logInternalError(localError, "AuthProvider.signOutLocalFallback");
+          }
+        } finally {
+          cleanAuthHashFromUrl();
         }
-        setSession(null);
       },
       continueAsGuest() {
         setIsGuest(true);

@@ -4,6 +4,8 @@ import { Badge, Card, PillButton, ProgressBar, Row, SectionHeader } from "../com
 import { useI18n } from "../i18n";
 import { COLORS, RADII, TYPO } from "../theme";
 import { AcademyClass, StudySet, VocabItem, VocabularyAssignment } from "../types";
+import { createImmediateAssignmentAvailability, createPreClassTestAvailability, formatClassSchedule, getAssignmentAvailability } from "../utils/assignmentAvailability";
+import { sanitizeText, validateDateString, validateNumberRange, validateRequiredText } from "../utils/validation";
 
 type AssignMode =
   | "기존 단어세트 배포"
@@ -15,7 +17,7 @@ type AssignMode =
 function TopBack({ title, onBack }: { title: string; onBack: () => void }) {
   const { t } = useI18n();
   return (
-    <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
+    <Row style={[styles.stickyHeader, { justifyContent: "space-between", alignItems: "center" }]}>
       <Pressable onPress={onBack} style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.9 }]}>
         <Text style={styles.backText}>‹ {t("뒤로")}</Text>
       </Pressable>
@@ -54,7 +56,7 @@ export function TeacherDistributeScreen({
   onBack: () => void;
   onAssign: (assignment: VocabularyAssignment) => void;
 }) {
-  const { t, tm } = useI18n();
+  const { t, tm, language } = useI18n();
   const [classId, setClassId] = useState(prefillClassId || classes[0]?.id || "");
   const [mode, setMode] = useState<AssignMode>("기존 단어세트 배포");
 
@@ -62,6 +64,7 @@ export function TeacherDistributeScreen({
     () =>
       studySets.filter((s) =>
         [
+          "set_recent_eju_2016_2025",
           "set_top100",
           "set_300",
           "set_reason",
@@ -119,9 +122,18 @@ export function TeacherDistributeScreen({
     teacherMemo: "매일 15분씩 진행해보세요.",
     dailyReminder: false,
     allowAfterDue: true,
+    releaseMode: "수업 30분 전 공개" as VocabularyAssignment["releaseMode"],
   });
 
   const cls = useMemo(() => classes.find((c) => c.id === classId) || classes[0], [classes, classId]);
+  const releasePreview = useMemo(() => {
+    if (!cls) return null;
+    const availability =
+      settings.releaseMode === "수업 30분 전 공개"
+        ? getAssignmentAvailability({ ...createPreClassTestAvailability(cls), id: "preview", title: "", classId: cls.id, wordIds: [], dueDate: "", requiredAccuracy: 80, teacherMemo: "", createdBy: "", statusByStudent: {}, progressByStudent: {}, accuracyByStudent: {} })
+        : getAssignmentAvailability({ ...createImmediateAssignmentAvailability(), id: "preview", title: "", classId: cls.id, wordIds: [], dueDate: "", requiredAccuracy: 80, teacherMemo: "", createdBy: "", statusByStudent: {}, progressByStudent: {}, accuracyByStudent: {} });
+    return availability;
+  }, [cls, settings.releaseMode]);
 
   const filteredVocab = useMemo(() => {
     const q = search.trim();
@@ -160,9 +172,9 @@ export function TeacherDistributeScreen({
     }
     if (mode === "오답 기반 자동 추천 세트") {
       return vocab
-        .filter((v) => v.wrongCount > 0 || v.reviewStatus === "Review")
+        .filter((v) => v.cumulativeWrongAttempts > 0 || v.recentWrongAttempts7d > 0)
         .slice()
-        .sort((a, b) => b.wrongCount - a.wrongCount)
+        .sort((a, b) => b.recentWrongAttempts7d - a.recentWrongAttempts7d || b.cumulativeWrongAttempts - a.cumulativeWrongAttempts)
         .slice(0, 60)
         .map((v) => v.id);
     }
@@ -196,19 +208,42 @@ export function TeacherDistributeScreen({
     }
 
     const now = new Date();
-    const due = settings.dueDate.trim()
-      ? settings.dueDate.trim()
+    const dueValidation = validateDateString(settings.dueDate, language, false);
+    if (!dueValidation.ok) {
+      Alert.alert(t("마감일"), dueValidation.message);
+      return;
+    }
+
+    const accuracyValidation = validateNumberRange(settings.requiredAccuracy, 50, 95, language);
+    if (!accuracyValidation.ok) {
+      Alert.alert(t("필수 정답률"), accuracyValidation.message);
+      return;
+    }
+
+    const titleValidation = validateRequiredText(settings.title || makeDefaultTitle(), 80, language);
+    if (!titleValidation.ok) {
+      Alert.alert(t("제목"), titleValidation.message);
+      return;
+    }
+
+    const due = dueValidation.value
+      ? dueValidation.value
       : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate() + 1).padStart(2, "0")} 18:00`;
 
-    const title = settings.title.trim() || makeDefaultTitle();
+    const title = titleValidation.value;
+    const availabilityFields =
+      settings.releaseMode === "수업 30분 전 공개" && cls
+        ? createPreClassTestAvailability(cls, now)
+        : createImmediateAssignmentAvailability();
     const a: VocabularyAssignment = {
       id: `asmt_${Date.now()}`,
       title,
       classId: cls.id,
       wordIds: wordIds.slice(0, 120),
+      ...availabilityFields,
       dueDate: due,
-      requiredAccuracy: settings.requiredAccuracy,
-      teacherMemo: settings.teacherMemo,
+      requiredAccuracy: accuracyValidation.value,
+      teacherMemo: sanitizeText(settings.teacherMemo, 300),
       createdBy: "EJUEDU 선생님",
       statusByStudent: {},
       progressByStudent: {},
@@ -227,7 +262,7 @@ export function TeacherDistributeScreen({
   }
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll}>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll} stickyHeaderIndices={[0]}>
       <TopBack title={t("단어 배포")} onBack={onBack} />
 
       <Card style={{ marginTop: 12 }}>
@@ -242,6 +277,9 @@ export function TeacherDistributeScreen({
             />
           ))}
         </Row>
+        {cls ? (
+          <Text style={styles.muted}>{t("수업 시간")}: {formatClassSchedule(cls)}</Text>
+        ) : null}
       </Card>
 
       <Card style={{ marginTop: 12 }}>
@@ -353,9 +391,39 @@ export function TeacherDistributeScreen({
 
       <Card style={{ marginTop: 12 }}>
         <Text style={styles.hero}>4) {t("과제 설정")}</Text>
+        <Text style={styles.settingLabel}>{t("공개 방식")}</Text>
+        <Row style={{ marginTop: 8, flexWrap: "wrap" }}>
+          <PillButton
+            label="수업 30분 전 공개"
+            selected={settings.releaseMode === "수업 30분 전 공개"}
+            onPress={() => setSettings((p) => ({ ...p, releaseMode: "수업 30분 전 공개" }))}
+          />
+          <PillButton
+            label="즉시 공개"
+            selected={settings.releaseMode === "즉시 공개"}
+            onPress={() => setSettings((p) => ({ ...p, releaseMode: "즉시 공개" }))}
+          />
+        </Row>
+        <View style={styles.releaseBox}>
+          <Text style={styles.releaseTitle}>
+            {t(settings.releaseMode === "수업 30분 전 공개" ? "수업 전 단어 테스트" : "일반 단어 과제")}
+          </Text>
+          <Text style={styles.muted}>
+            {settings.releaseMode === "수업 30분 전 공개"
+              ? t("학생 화면에는 잠금 상태로 보이고, 수업 시작 30분 전부터 테스트 버튼이 열립니다.")
+              : t("배포 직후 학생이 바로 학습을 시작할 수 있습니다.")}
+          </Text>
+          {releasePreview ? (
+            <Text style={styles.mutedSmall}>
+              {t("공개")}: {releasePreview.availableLabel}
+              {releasePreview.classStartLabel ? ` · ${t("수업")} ${releasePreview.classStartLabel}` : ""}
+            </Text>
+          ) : null}
+        </View>
         <TextInput
           value={settings.title}
           onChangeText={(t) => setSettings((p) => ({ ...p, title: t }))}
+          maxLength={80}
           placeholder={`${t("제목")} (${t("기본")}: ${t(makeDefaultTitle())})`}
           placeholderTextColor="#7B82A6"
           style={styles.textInput}
@@ -363,6 +431,7 @@ export function TeacherDistributeScreen({
         <TextInput
           value={settings.dueDate}
           onChangeText={(t) => setSettings((p) => ({ ...p, dueDate: t }))}
+          maxLength={40}
           placeholder={`${t("마감일")} (${t("예")}: 2026-05-09 18:00)`}
           placeholderTextColor="#7B82A6"
           style={styles.textInput}
@@ -383,6 +452,7 @@ export function TeacherDistributeScreen({
         <TextInput
           value={settings.teacherMemo}
           onChangeText={(t) => setSettings((p) => ({ ...p, teacherMemo: t }))}
+          maxLength={300}
           placeholder={t("선생님 메모")}
           placeholderTextColor="#7B82A6"
           style={styles.textInput}
@@ -416,11 +486,16 @@ export function TeacherDistributeScreen({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.bg, paddingHorizontal: 20 },
   scroll: { paddingTop: 18, paddingBottom: 115 },
+  stickyHeader: { backgroundColor: COLORS.bg, paddingBottom: 10, zIndex: 10 },
   backBtn: { height: 48, minWidth: 82, paddingHorizontal: 12, borderRadius: 24, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.line, justifyContent: "center" },
   backText: { color: COLORS.text, fontWeight: "800" },
   topTitle: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h3, textAlign: "center", flex: 1 },
   hero: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h2 },
   muted: { color: COLORS.muted, lineHeight: TYPO.smallLine, fontSize: TYPO.small, marginTop: 6 },
+  mutedSmall: { color: COLORS.muted, lineHeight: TYPO.smallLine, fontSize: TYPO.small, marginTop: 10 },
+  settingLabel: { color: COLORS.text, fontWeight: "900", marginTop: 12 },
+  releaseBox: { backgroundColor: COLORS.card2, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, padding: 12, marginTop: 10 },
+  releaseTitle: { color: COLORS.text, fontWeight: "900", fontSize: TYPO.h3 },
   choice: { backgroundColor: COLORS.card2, borderRadius: RADII.card, borderWidth: 1, borderColor: COLORS.line, padding: 14 },
   choiceOn: { borderColor: COLORS.blue, backgroundColor: "#10143C" },
   choiceText: { color: COLORS.text, fontWeight: "800" },

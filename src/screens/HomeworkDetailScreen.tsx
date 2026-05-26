@@ -3,12 +3,13 @@ import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-nati
 import { Badge, Card, ProgressBar, Row, SectionHeader } from "../components/common";
 import { useI18n } from "../i18n";
 import { COLORS, RADII, TYPO } from "../theme";
-import { StudyStyle, VocabItem, VocabularyAssignment } from "../types";
+import { LearnMode, StudyStyle, VocabItem, VocabularyAssignment } from "../types";
+import { getAssignmentAvailability } from "../utils/assignmentAvailability";
 
 function TopBack({ title, onBack }: { title: string; onBack: () => void }) {
   const { t } = useI18n();
   return (
-    <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
+    <Row style={[styles.stickyHeader, { justifyContent: "space-between", alignItems: "center" }]}>
       <Pressable onPress={onBack} style={({ pressed }) => [styles.backBtn, pressed && { opacity: 0.9 }]}>
         <Text style={styles.backText}>‹ {t("뒤로")}</Text>
       </Pressable>
@@ -32,7 +33,7 @@ export function HomeworkDetailScreen({
   vocabById: Map<string, VocabItem>;
   studyStyle: StudyStyle;
   onBack: () => void;
-  onStartHomeworkLearn: (wordIds: string[], title: string) => void;
+  onStartHomeworkLearn: (wordIds: string[], title: string, mode: LearnMode) => void;
   onMarkHomeworkDone: (assignmentId: string) => void;
 }) {
   const { t, tm } = useI18n();
@@ -41,6 +42,8 @@ export function HomeworkDetailScreen({
   const progress = Object.values(assignment.progressByStudent)[0] ?? 0;
   const pct = Math.round((progress / total) * 100);
   const status = Object.values(assignment.statusByStudent)[0] ?? "미시작";
+  const availability = getAssignmentAvailability(assignment);
+  const homeworkMode = assignment.learnMode || (assignment.assignmentKind === "수업 전 단어 테스트" ? "뜻 맞히기" : "낱말카드");
 
   const styleAdvice = useMemo(() => {
     if (studyStyle === "오답집중형") return "오답 단어부터 먼저 복습하는 흐름으로 진행합니다.";
@@ -52,17 +55,24 @@ export function HomeworkDetailScreen({
   }, [studyStyle]);
 
   return (
-    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll}>
+    <ScrollView style={styles.screen} contentContainerStyle={styles.scroll} stickyHeaderIndices={[0]}>
       <TopBack title={t("과제")} onBack={onBack} />
 
       <Card style={{ marginTop: 12 }}>
         <Text style={styles.hero}>{t(assignment.title)}</Text>
         <Text style={styles.muted}>{t("마감")}: {assignment.dueDate}</Text>
         <Row style={{ marginTop: 10, flexWrap: "wrap" }}>
+          <Badge label={t(assignment.assignmentKind || "단어 과제")} tone={assignment.assignmentKind === "수업 전 단어 테스트" ? "violet" : "default"} />
+          <Badge label={t(availability.statusLabel)} tone={availability.isOpen ? "blue" : "default"} />
           <Badge label={`${t("단어")} ${assignment.wordIds.length}${t("개")}`} tone="default" />
           <Badge label={`${t("필수 정답률")} ${assignment.requiredAccuracy}%`} tone="violet" />
           <Badge label={`${t("상태")} ${t(status)}`} tone={status === "완료" ? "success" : "default"} />
         </Row>
+        <View style={styles.releaseCard}>
+          <Text style={styles.releaseTitle}>{t(availability.releaseLabel)}</Text>
+          <Text style={styles.muted}>{t("공개")}: {availability.availableLabel}</Text>
+          {availability.classStartLabel ? <Text style={styles.muted}>{t("수업 시작")}: {availability.classStartLabel}</Text> : null}
+        </View>
         <View style={{ marginTop: 12 }}>
           <ProgressBar value={pct} />
           <Text style={styles.mutedSmall}>{t("진행률")} {progress}/{total}</Text>
@@ -77,10 +87,16 @@ export function HomeworkDetailScreen({
 
       <Row style={{ marginTop: 12 }}>
         <Pressable
-          style={[styles.primaryBtn, { flex: 1 }]}
-          onPress={() => onStartHomeworkLearn(assignment.wordIds, `${assignment.title} · ${t("과제 학습")}`)}
+          style={[styles.primaryBtn, { flex: 1 }, !availability.isOpen && styles.primaryBtnDisabled]}
+          onPress={() => {
+            if (!availability.isOpen) {
+              Alert.alert(t("아직 열리지 않았습니다"), t("수업 시작 30분 전부터 단어 테스트를 시작할 수 있습니다."));
+              return;
+            }
+            onStartHomeworkLearn(assignment.wordIds, `${assignment.title} · ${t(homeworkMode)}`, homeworkMode);
+          }}
         >
-          <Text style={styles.primaryBtnText}>{t("학습 시작")}</Text>
+          <Text style={styles.primaryBtnText}>{t(availability.isOpen ? "테스트 시작" : "수업 전 잠김")}</Text>
         </Pressable>
       </Row>
       <Row style={{ marginTop: 10 }}>
@@ -119,6 +135,7 @@ export function HomeworkDetailScreen({
 const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: COLORS.bg, paddingHorizontal: 20 },
   scroll: { paddingTop: 18, paddingBottom: 115 },
+  stickyHeader: { backgroundColor: COLORS.bg, paddingBottom: 10, zIndex: 10 },
   backBtn: { height: 48, minWidth: 82, paddingHorizontal: 12, borderRadius: 24, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.line, justifyContent: "center" },
   backText: { color: COLORS.text, fontWeight: "800" },
   topTitle: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h3, textAlign: "center", flex: 1 },
@@ -126,7 +143,10 @@ const styles = StyleSheet.create({
   itemTitle: { color: COLORS.text, fontWeight: "800" },
   muted: { color: COLORS.muted, lineHeight: TYPO.smallLine, fontSize: TYPO.small, marginTop: 6 },
   mutedSmall: { color: COLORS.muted, lineHeight: TYPO.smallLine, fontSize: TYPO.small, marginTop: 10 },
+  releaseCard: { backgroundColor: COLORS.card2, borderRadius: 14, borderWidth: 1, borderColor: COLORS.line, padding: 12, marginTop: 12 },
+  releaseTitle: { color: COLORS.text, fontWeight: "900" },
   primaryBtn: { backgroundColor: COLORS.blue, borderRadius: 14, minHeight: 52, justifyContent: "center", alignItems: "center" },
+  primaryBtnDisabled: { backgroundColor: COLORS.card2, borderWidth: 1, borderColor: COLORS.line, opacity: 0.7 },
   primaryBtnText: { color: COLORS.text, fontWeight: "800" },
   secondaryBtn: { backgroundColor: COLORS.card2, borderRadius: 14, minHeight: 52, justifyContent: "center", alignItems: "center", borderWidth: 1, borderColor: COLORS.line },
   secondaryBtnText: { color: COLORS.text, fontWeight: "800" },

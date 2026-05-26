@@ -12,36 +12,40 @@
   VocabularyAssignment,
 } from "../types";
 import { MASTER_VOCAB_SEEDS } from "./masterVocabSeeds";
+import { SCIENCE_MATH_VOCAB_SEEDS } from "./scienceMathVocabSeeds";
+import { TOEIC_5_BOOK_VOCAB_SEEDS } from "./toeicBookVocabSeeds";
+import { TOEIC_BUSINESS_VOCAB_SEEDS } from "./toeicBusinessVocabSeeds";
+import { createPreClassTestAvailability } from "../utils/assignmentAvailability";
 
 export const DIFFICULTY_LABELS: Record<VocabDifficulty, DifficultyLabel> = {
   1: {
     label: "필수 기초",
     shortBadge: "필수",
     description:
-      "처음부터 반드시 외워야 하는 단어입니다. N3~N2 학생과 200점 목표 학생에게 추천됩니다.",
+      "쉽고 자주 쓰이는 기본어입니다. 자주 나온다고 해서 자동으로 고난도에 올리지 않습니다.",
   },
   2: {
     label: "빈출 핵심",
     shortBadge: "핵심",
-    description: "EJU 기출에 자주 나오고 기본 점수 확보에 중요한 단어입니다.",
+    description: "기출·실전에서 자주 확인되는 핵심어입니다. 우선 암기용이지만 난이도는 중하로 봅니다.",
   },
   3: {
     label: "점수 상승",
     shortBadge: "300점",
     description:
-      "300점 목표 학생이 약점을 줄이기 위해 외워야 하는 단어입니다.",
+      "문맥에서 헷갈리기 쉬운 단어입니다. 기본 단어를 넘어서 점수 차이를 만드는 구간입니다.",
   },
   4: {
     label: "고득점 어휘",
     shortBadge: "고득점",
     description:
-      "350+ 목표 학생에게 필요한 어려운 단어와 표현입니다.",
+      "뜻이 추상적이거나 문제 안에서 응용되는 단어입니다. 고득점 목표 학습에 우선 배치됩니다.",
   },
   5: {
     label: "최상위 표현",
     shortBadge: "최상위",
     description:
-      "기술문, 학술 독해, 상위권 학생에게 필요한 고난도 표현입니다.",
+      "기술문·학술문·전문 분야에서 쓰이는 심화 표현입니다. 출현 빈도보다 난이도와 응용도를 더 봅니다.",
   },
 };
 
@@ -75,7 +79,10 @@ const QUESTION_TYPES = [
 
 const SUBJECTS: VocabSubject[] = [
   "일본어",
+  "영어",
+  "실용일본어",
   "종합과목",
+  "EJU 이과",
   "기술문",
   "청독해",
   "한자",
@@ -106,6 +113,23 @@ function pick<T>(arr: readonly T[], seed: number) {
 
 function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
+}
+
+const CURATED_SYNONYMS: Record<string, string[]> = {
+  格差: ["不平等", "差", "隔たり"],
+  教育格差: ["教育の不平等"],
+  貧困: ["困窮"],
+};
+
+function withCuratedSynonyms(items: VocabItem[]) {
+  return items.map((item) => {
+    const curated = CURATED_SYNONYMS[item.word];
+    if (!curated?.length) return item;
+    return {
+      ...item,
+      synonyms: uniq(curated.concat(item.synonyms || []).filter((word) => word && word !== item.word)).slice(0, 6),
+    };
+  });
 }
 
 function shuffle<T>(arr: T[], seed: number) {
@@ -345,6 +369,41 @@ function difficultyFromLevel(level: VocabItem["level"], seed: number): VocabDiff
   return r > 0.85 ? 4 : 3; // 청독해·자료형
 }
 
+const EASY_HIGH_FREQUENCY_WORDS = new Map<string, VocabDifficulty>([
+  ["理由", 1],
+  ["必要", 1],
+  ["目的", 1],
+  ["原因", 2],
+  ["結果", 2],
+  ["資料", 2],
+  ["表", 1],
+  ["グラフ", 1],
+  ["割合", 2],
+  ["比率", 2],
+  ["平均", 2],
+  ["増加", 2],
+  ["減少", 2],
+  ["変化", 2],
+  ["具体例", 2],
+  ["結論", 2],
+  ["賛成", 2],
+  ["反対", 2],
+  ["比較", 2],
+  ["述べる", 2],
+  ["根拠", 3],
+  ["主張", 3],
+  ["反論", 3],
+  ["立場", 3],
+]);
+
+function calibratedDifficultyFromSeed(seed: WordSeed, seedNum: number): VocabDifficulty {
+  if (seed.difficulty) return seed.difficulty;
+  const easyOverride = EASY_HIGH_FREQUENCY_WORDS.get(seed.word);
+  if (easyOverride) return easyOverride;
+  if (seed.part === "기초") return 2;
+  return difficultyFromLevel(seed.level, seedNum);
+}
+
 function hasFinalConsonant(text: string) {
   const chars = text.match(/[가-힣]/g);
   if (!chars?.length) return false;
@@ -415,6 +474,7 @@ type WordSeed = {
   subject: VocabSubject;
   part: string;
   questionTypes: string[];
+  difficulty?: VocabDifficulty;
   synonyms?: string[];
   antonyms?: string[];
   relatedWords?: string[];
@@ -538,6 +598,1221 @@ const EXTRA_SEEDS: WordSeed[] = [
   { word: "反省", reading: "はんせい", meaningKo: "반성", level: "200점 목표", subject: "일본어", part: "생활어", questionTypes: ["문맥 이해"], relatedWords: ["認める"] },
 ];
 
+type ExtensionVocabSeed = WordSeed & {
+  exampleJa: string;
+  exampleKo: string;
+  explanationKo?: string;
+  frequencyScore?: number;
+  difficulty?: VocabDifficulty;
+  importance?: VocabItem["importance"];
+  targetScore?: VocabItem["targetScore"];
+  occurrenceCount?: number;
+  appearedIn?: Occurrence[];
+  sourceType?: VocabItem["sourceType"];
+};
+
+const EXTENSION_VOCAB_SEEDS: ExtensionVocabSeed[] = [
+  {
+    word: "proof of English proficiency",
+    reading: "proof of English proficiency",
+    meaningKo: "영어 능력 증명서",
+    level: "300점 목표",
+    subject: "영어",
+    part: "출원 영어",
+    questionTypes: ["출원 영어", "TOEFL", "IELTS", "TOEIC"],
+    relatedWords: ["TOEFL iBT", "IELTS Academic", "TOEIC", "application requirements"],
+    exampleJa: "The university requires proof of English proficiency.",
+    exampleKo: "그 대학은 영어 능력 증명서를 요구합니다.",
+    explanationKo: "일본 대학 지원 요강에서 TOEFL, IELTS, TOEIC 같은 영어 성적 제출을 가리킬 때 자주 나오는 표현입니다.",
+    difficulty: 2,
+    frequencyScore: 91,
+  },
+  {
+    word: "application requirements",
+    reading: "application requirements",
+    meaningKo: "지원 조건",
+    level: "300점 목표",
+    subject: "영어",
+    part: "출원 영어",
+    questionTypes: ["출원 영어", "대학 입시 영어"],
+    relatedWords: ["eligibility", "deadline", "documents"],
+    exampleJa: "Check the application requirements before preparing documents.",
+    exampleKo: "서류를 준비하기 전에 지원 조건을 확인하세요.",
+    explanationKo: "학부·대학원 모집요강을 읽을 때 가장 먼저 확인해야 하는 핵심 표현입니다.",
+    difficulty: 2,
+    frequencyScore: 90,
+  },
+  {
+    word: "application deadline",
+    reading: "application deadline",
+    meaningKo: "지원 마감일",
+    level: "200점 목표",
+    subject: "영어",
+    part: "출원 영어",
+    questionTypes: ["출원 영어", "TOEIC", "TOEFL", "IELTS"],
+    relatedWords: ["submit", "documents", "late application"],
+    exampleJa: "The application deadline is March 15.",
+    exampleKo: "지원 마감일은 3월 15일입니다.",
+    difficulty: 1,
+    frequencyScore: 88,
+  },
+  {
+    word: "transcript",
+    reading: "transcript",
+    meaningKo: "성적증명서",
+    level: "200점 목표",
+    subject: "영어",
+    part: "출원 영어",
+    questionTypes: ["출원 영어"],
+    relatedWords: ["certificate", "academic record"],
+    exampleJa: "Upload an official transcript issued by your school.",
+    exampleKo: "학교에서 발급한 공식 성적증명서를 업로드하세요.",
+    difficulty: 2,
+    frequencyScore: 86,
+  },
+  {
+    word: "certificate of graduation",
+    reading: "certificate of graduation",
+    meaningKo: "졸업증명서",
+    level: "200점 목표",
+    subject: "영어",
+    part: "출원 영어",
+    questionTypes: ["출원 영어"],
+    relatedWords: ["certificate of expected graduation", "transcript"],
+    exampleJa: "A certificate of graduation is required for enrollment.",
+    exampleKo: "입학 절차에는 졸업증명서가 필요합니다.",
+    difficulty: 2,
+    frequencyScore: 84,
+  },
+  {
+    word: "recommendation letter",
+    reading: "recommendation letter",
+    meaningKo: "추천서",
+    level: "300점 목표",
+    subject: "영어",
+    part: "출원 영어",
+    questionTypes: ["출원 영어", "대학 입시 영어"],
+    relatedWords: ["referee", "professor", "application"],
+    exampleJa: "Ask your teacher for a recommendation letter early.",
+    exampleKo: "선생님께 추천서를 미리 부탁하세요.",
+    difficulty: 2,
+    frequencyScore: 83,
+  },
+  {
+    word: "statement of purpose",
+    reading: "statement of purpose",
+    meaningKo: "학업계획서, 지원동기서",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "출원 영어",
+    questionTypes: ["출원 영어", "TOEFL", "IELTS"],
+    relatedWords: ["motivation letter", "essay", "research plan"],
+    exampleJa: "Your statement of purpose should explain why you chose this program.",
+    exampleKo: "학업계획서는 왜 이 전공을 선택했는지 설명해야 합니다.",
+    difficulty: 3,
+    frequencyScore: 86,
+  },
+  {
+    word: "tuition waiver",
+    reading: "tuition waiver",
+    meaningKo: "수업료 면제",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "출원 영어",
+    questionTypes: ["출원 영어", "장학금 영어"],
+    relatedWords: ["scholarship", "financial aid"],
+    exampleJa: "Students may apply for a tuition waiver after admission.",
+    exampleKo: "학생은 합격 후 수업료 면제를 신청할 수 있습니다.",
+    difficulty: 3,
+    frequencyScore: 78,
+  },
+  {
+    word: "academic writing",
+    reading: "academic writing",
+    meaningKo: "학술적 글쓰기",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "아카데믹 영어",
+    questionTypes: ["TOEFL", "IELTS", "아카데믹 영어"],
+    relatedWords: ["essay", "argument", "evidence"],
+    exampleJa: "Academic writing requires clear evidence and structure.",
+    exampleKo: "학술적 글쓰기는 명확한 근거와 구조가 필요합니다.",
+    difficulty: 3,
+    frequencyScore: 82,
+  },
+  {
+    word: "integrated task",
+    reading: "integrated task",
+    meaningKo: "통합형 과제",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "TOEFL",
+    questionTypes: ["TOEFL", "아카데믹 영어"],
+    relatedWords: ["reading", "listening", "speaking", "writing"],
+    exampleJa: "In an integrated task, you use reading and listening information.",
+    exampleKo: "통합형 과제에서는 읽기와 듣기 정보를 함께 사용합니다.",
+    difficulty: 3,
+    frequencyScore: 79,
+  },
+  {
+    word: "band score",
+    reading: "band score",
+    meaningKo: "IELTS 밴드 점수",
+    level: "300점 목표",
+    subject: "영어",
+    part: "IELTS",
+    questionTypes: ["IELTS", "아카데믹 영어"],
+    relatedWords: ["overall band", "speaking", "writing"],
+    exampleJa: "Some programs require an overall band score of 6.5.",
+    exampleKo: "일부 프로그램은 overall band 6.5를 요구합니다.",
+    difficulty: 2,
+    frequencyScore: 80,
+  },
+  {
+    word: "listening comprehension",
+    reading: "listening comprehension",
+    meaningKo: "듣기 이해력",
+    level: "300점 목표",
+    subject: "영어",
+    part: "영어 시험",
+    questionTypes: ["TOEIC", "TOEFL", "IELTS"],
+    relatedWords: ["lecture", "conversation", "note-taking"],
+    exampleJa: "Listening comprehension improves when you review the transcript.",
+    exampleKo: "스크립트를 복습하면 듣기 이해력이 좋아집니다.",
+    difficulty: 2,
+    frequencyScore: 84,
+  },
+  {
+    word: "product-market fit",
+    reading: "PMF",
+    meaningKo: "제품-시장 적합성",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "비즈니스 영어", "전문 용어"],
+    relatedWords: ["traction", "retention", "customer pain"],
+    exampleJa: "We have not reached product-market fit yet.",
+    exampleKo: "아직 제품-시장 적합성에 도달하지 못했습니다.",
+    explanationKo: "스타트업에서 제품이 실제 시장 문제를 충분히 해결하고 있는지를 말할 때 쓰는 핵심 용어입니다.",
+    difficulty: 4,
+    frequencyScore: 93,
+  },
+  {
+    word: "runway",
+    reading: "runway",
+    meaningKo: "남은 운영 가능 기간",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "투자 영어", "전문 용어"],
+    relatedWords: ["burn rate", "cash flow", "fundraising"],
+    exampleJa: "We have nine months of runway left.",
+    exampleKo: "우리에게는 9개월 정도의 운영 가능 기간이 남아 있습니다.",
+    difficulty: 3,
+    frequencyScore: 91,
+  },
+  {
+    word: "burn rate",
+    reading: "burn rate",
+    meaningKo: "현금 소진 속도",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "투자 영어", "전문 용어"],
+    relatedWords: ["runway", "cash flow", "cost structure"],
+    exampleJa: "Reducing burn rate gives us more time to test the product.",
+    exampleKo: "현금 소진 속도를 낮추면 제품을 검증할 시간이 늘어납니다.",
+    difficulty: 3,
+    frequencyScore: 90,
+  },
+  {
+    word: "traction",
+    reading: "traction",
+    meaningKo: "시장 반응, 성장 지표",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "투자 영어", "전문 용어"],
+    relatedWords: ["growth", "retention", "revenue"],
+    exampleJa: "Investors want to see clear traction before the next round.",
+    exampleKo: "투자자는 다음 라운드 전에 명확한 시장 반응을 보고 싶어 합니다.",
+    difficulty: 3,
+    frequencyScore: 92,
+  },
+  {
+    word: "pivot",
+    reading: "pivot",
+    meaningKo: "사업 방향 전환",
+    level: "300점 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "비즈니스 영어"],
+    relatedWords: ["strategy", "hypothesis", "validation"],
+    exampleJa: "The team decided to pivot after user interviews.",
+    exampleKo: "팀은 사용자 인터뷰 후 방향 전환을 결정했습니다.",
+    difficulty: 2,
+    frequencyScore: 87,
+  },
+  {
+    word: "go-to-market",
+    reading: "GTM",
+    meaningKo: "시장 진입 전략",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "비즈니스 영어", "전문 용어"],
+    relatedWords: ["channel", "positioning", "launch"],
+    exampleJa: "Our go-to-market strategy focuses on university students.",
+    exampleKo: "우리의 시장 진입 전략은 대학생 사용자에 집중합니다.",
+    difficulty: 3,
+    frequencyScore: 89,
+  },
+  {
+    word: "retention",
+    reading: "retention",
+    meaningKo: "유지율",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "SaaS 지표", "전문 용어"],
+    relatedWords: ["churn", "engagement", "cohort"],
+    exampleJa: "Day-7 retention is more important than downloads.",
+    exampleKo: "다운로드 수보다 7일차 유지율이 더 중요합니다.",
+    difficulty: 3,
+    frequencyScore: 90,
+  },
+  {
+    word: "churn",
+    reading: "churn",
+    meaningKo: "이탈, 해지",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "SaaS 지표", "전문 용어"],
+    relatedWords: ["retention", "subscription", "cancellation"],
+    exampleJa: "High churn means users are not finding enough value.",
+    exampleKo: "이탈률이 높다는 것은 사용자가 충분한 가치를 느끼지 못한다는 뜻입니다.",
+    difficulty: 3,
+    frequencyScore: 88,
+  },
+  {
+    word: "conversion rate",
+    reading: "conversion rate",
+    meaningKo: "전환율",
+    level: "300점 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "마케팅 영어", "SaaS 지표"],
+    relatedWords: ["funnel", "signup", "purchase"],
+    exampleJa: "We improved the signup conversion rate.",
+    exampleKo: "가입 전환율을 개선했습니다.",
+    difficulty: 2,
+    frequencyScore: 88,
+  },
+  {
+    word: "unit economics",
+    reading: "unit economics",
+    meaningKo: "단위경제성",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "스타트업 영어",
+    questionTypes: ["스타트업 영어", "투자 영어", "SaaS 지표"],
+    relatedWords: ["LTV", "CAC", "margin"],
+    exampleJa: "The unit economics are not healthy yet.",
+    exampleKo: "아직 단위경제성이 건강하지 않습니다.",
+    difficulty: 4,
+    frequencyScore: 86,
+  },
+  {
+    word: "term sheet",
+    reading: "term sheet",
+    meaningKo: "투자 조건서",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "투자 영어",
+    questionTypes: ["스타트업 영어", "투자 영어", "전문 용어"],
+    relatedWords: ["valuation", "equity", "due diligence"],
+    exampleJa: "The investor sent us a term sheet.",
+    exampleKo: "투자자가 투자 조건서를 보내왔습니다.",
+    difficulty: 4,
+    frequencyScore: 82,
+  },
+  {
+    word: "cap table",
+    reading: "cap table",
+    meaningKo: "지분 구조표",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "투자 영어",
+    questionTypes: ["스타트업 영어", "투자 영어", "전문 용어"],
+    relatedWords: ["equity", "shareholder", "dilution"],
+    exampleJa: "Keep the cap table simple before fundraising.",
+    exampleKo: "투자 유치 전에는 지분 구조표를 단순하게 유지하세요.",
+    difficulty: 4,
+    frequencyScore: 80,
+  },
+  {
+    word: "Could you clarify the timeline?",
+    reading: "could you clarify the timeline",
+    meaningKo: "일정을 명확히 설명해 주실 수 있을까요?",
+    level: "200점 목표",
+    subject: "영어",
+    part: "비즈니스 영어 문장",
+    questionTypes: ["비즈니스 영어", "실무 문장", "회의 표현"],
+    relatedWords: ["timeline", "deadline", "schedule"],
+    exampleJa: "Could you clarify the timeline before we confirm the launch date?",
+    exampleKo: "출시일을 확정하기 전에 일정을 명확히 설명해 주실 수 있을까요?",
+    difficulty: 2,
+    frequencyScore: 87,
+  },
+  {
+    word: "Let's align on the next steps.",
+    reading: "let's align on the next steps",
+    meaningKo: "다음 단계에 대해 합의합시다.",
+    level: "200점 목표",
+    subject: "영어",
+    part: "비즈니스 영어 문장",
+    questionTypes: ["비즈니스 영어", "실무 문장", "회의 표현"],
+    relatedWords: ["next steps", "alignment", "action items"],
+    exampleJa: "Let's align on the next steps and owners.",
+    exampleKo: "다음 단계와 담당자에 대해 합의합시다.",
+    difficulty: 2,
+    frequencyScore: 89,
+  },
+  {
+    word: "We need to validate the assumption.",
+    reading: "we need to validate the assumption",
+    meaningKo: "그 가설을 검증해야 합니다.",
+    level: "300점 목표",
+    subject: "영어",
+    part: "비즈니스 영어 문장",
+    questionTypes: ["비즈니스 영어", "스타트업 영어", "실무 문장"],
+    relatedWords: ["validate", "assumption", "experiment"],
+    exampleJa: "We need to validate the assumption with real users.",
+    exampleKo: "실제 사용자로 그 가설을 검증해야 합니다.",
+    difficulty: 2,
+    frequencyScore: 88,
+  },
+  {
+    word: "Can we circle back after reviewing the data?",
+    reading: "can we circle back after reviewing the data",
+    meaningKo: "데이터를 검토한 뒤 다시 이야기할 수 있을까요?",
+    level: "300점 목표",
+    subject: "영어",
+    part: "비즈니스 영어 문장",
+    questionTypes: ["비즈니스 영어", "실무 문장", "회의 표현"],
+    relatedWords: ["circle back", "review", "data"],
+    exampleJa: "Can we circle back after reviewing the data tomorrow?",
+    exampleKo: "내일 데이터를 검토한 뒤 다시 이야기할 수 있을까요?",
+    difficulty: 3,
+    frequencyScore: 82,
+  },
+  {
+    word: "The proposal needs a clearer value proposition.",
+    reading: "the proposal needs a clearer value proposition",
+    meaningKo: "제안서에는 더 명확한 가치 제안이 필요합니다.",
+    level: "350+ 목표",
+    subject: "영어",
+    part: "비즈니스 영어 문장",
+    questionTypes: ["비즈니스 영어", "스타트업 영어", "실무 문장"],
+    relatedWords: ["proposal", "value proposition", "pitch"],
+    exampleJa: "The proposal needs a clearer value proposition for schools.",
+    exampleKo: "그 제안서에는 학교를 위한 더 명확한 가치 제안이 필요합니다.",
+    difficulty: 3,
+    frequencyScore: 83,
+  },
+  {
+    word: "お世話になっております",
+    reading: "おせわになっております",
+    meaningKo: "항상 신세지고 있습니다, 비즈니스 메일 첫인사",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "메일 표현", "회사 실무"],
+    relatedWords: ["ご連絡ありがとうございます", "よろしくお願いいたします"],
+    exampleJa: "お世話になっております。VocaRushのキムです。",
+    exampleKo: "안녕하세요. VocaRush의 김입니다.",
+    explanationKo: "일본 회사 메일에서 첫 줄에 자주 쓰는 정중한 인사입니다.",
+    difficulty: 2,
+    frequencyScore: 92,
+  },
+  {
+    word: "ご確認いただけますでしょうか",
+    reading: "ごかくにんいただけますでしょうか",
+    meaningKo: "확인해 주실 수 있을까요?",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "메일 표현", "회사 실무"],
+    relatedWords: ["ご査収ください", "ご返信お待ちしております"],
+    exampleJa: "添付資料をご確認いただけますでしょうか。",
+    exampleKo: "첨부 자료를 확인해 주실 수 있을까요?",
+    difficulty: 3,
+    frequencyScore: 90,
+  },
+  {
+    word: "恐れ入りますが",
+    reading: "おそれいりますが",
+    meaningKo: "죄송하지만, 송구하지만",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "메일 표현"],
+    relatedWords: ["恐縮ですが", "申し訳ございません"],
+    exampleJa: "恐れ入りますが、再度ご確認をお願いいたします。",
+    exampleKo: "죄송하지만 다시 한번 확인 부탁드립니다.",
+    difficulty: 3,
+    frequencyScore: 88,
+  },
+  {
+    word: "承知いたしました",
+    reading: "しょうちいたしました",
+    meaningKo: "알겠습니다, 확인했습니다",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "회의 표현", "회사 실무"],
+    relatedWords: ["かしこまりました", "了解しました"],
+    exampleJa: "日程変更の件、承知いたしました。",
+    exampleKo: "일정 변경 건, 확인했습니다.",
+    difficulty: 2,
+    frequencyScore: 88,
+  },
+  {
+    word: "日程調整",
+    reading: "にっていちょうせい",
+    meaningKo: "일정 조율",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "회의 표현", "회사 실무"],
+    relatedWords: ["候補日", "打ち合わせ", "会議"],
+    exampleJa: "来週の打ち合わせの日程調整をお願いいたします。",
+    exampleKo: "다음 주 미팅 일정 조율을 부탁드립니다.",
+    difficulty: 2,
+    frequencyScore: 87,
+  },
+  {
+    word: "議事録",
+    reading: "ぎじろく",
+    meaningKo: "회의록",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "회의 표현", "회사 실무"],
+    relatedWords: ["会議", "共有", "決定事項"],
+    exampleJa: "会議後に議事録を共有いたします。",
+    exampleKo: "회의 후 회의록을 공유하겠습니다.",
+    difficulty: 2,
+    frequencyScore: 83,
+  },
+  {
+    word: "見積書",
+    reading: "みつもりしょ",
+    meaningKo: "견적서",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "회사 실무"],
+    relatedWords: ["請求書", "納期", "費用"],
+    exampleJa: "見積書を本日中にお送りします。",
+    exampleKo: "견적서를 오늘 중으로 보내겠습니다.",
+    difficulty: 3,
+    frequencyScore: 80,
+  },
+  {
+    word: "納期",
+    reading: "のうき",
+    meaningKo: "납기, 제출 기한",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "회사 실무"],
+    relatedWords: ["締切", "スケジュール", "進捗"],
+    exampleJa: "納期に間に合うように進めます。",
+    exampleKo: "납기에 맞출 수 있도록 진행하겠습니다.",
+    difficulty: 3,
+    frequencyScore: 81,
+  },
+  {
+    word: "取り急ぎ",
+    reading: "とりいそぎ",
+    meaningKo: "우선 급히, 일단 먼저",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "비즈니스 일본어",
+    questionTypes: ["비즈니스 일본어", "메일 표현"],
+    relatedWords: ["まずは", "ご報告まで"],
+    exampleJa: "取り急ぎ、資料のみお送りいたします。",
+    exampleKo: "우선 급히 자료만 보내드립니다.",
+    difficulty: 3,
+    frequencyScore: 79,
+  },
+  {
+    word: "それな",
+    reading: "それな",
+    meaningKo: "그거 맞아, 완전 공감",
+    level: "필수 기초",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "신조어", "실사용 일본어"],
+    relatedWords: ["わかる", "たしかに"],
+    exampleJa: "明日の1限きついよね。- それな。",
+    exampleKo: "내일 1교시 힘들지. - 인정.",
+    difficulty: 1,
+    frequencyScore: 90,
+  },
+  {
+    word: "わかりみ",
+    reading: "わかりみ",
+    meaningKo: "공감됨, 이해됨",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "신조어", "실사용 일본어"],
+    relatedWords: ["それな", "共感"],
+    exampleJa: "締切前の焦り、わかりみが深い。",
+    exampleKo: "마감 전의 초조함, 너무 공감된다.",
+    difficulty: 2,
+    frequencyScore: 84,
+  },
+  {
+    word: "ガチ",
+    reading: "がち",
+    meaningKo: "진짜, 정말, serious",
+    level: "필수 기초",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "실사용 일본어"],
+    relatedWords: ["本当に", "マジ"],
+    exampleJa: "この課題、ガチで難しい。",
+    exampleKo: "이 과제 진짜 어렵다.",
+    difficulty: 1,
+    frequencyScore: 89,
+  },
+  {
+    word: "エモい",
+    reading: "えもい",
+    meaningKo: "감성적이다, 마음이 움직인다",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "신조어", "실사용 일본어"],
+    relatedWords: ["感動", "懐かしい"],
+    exampleJa: "この写真、夜のキャンパス感がエモい。",
+    exampleKo: "이 사진, 밤 캠퍼스 느낌이 감성적이다.",
+    difficulty: 2,
+    frequencyScore: 85,
+  },
+  {
+    word: "ワンチャン",
+    reading: "わんちゃん",
+    meaningKo: "어쩌면 가능성 있음",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "신조어", "실사용 일본어"],
+    relatedWords: ["可能性", "もしかしたら"],
+    exampleJa: "今から行けばワンチャン間に合う。",
+    exampleKo: "지금 가면 어쩌면 맞출 수 있어.",
+    difficulty: 2,
+    frequencyScore: 86,
+  },
+  {
+    word: "なるはや",
+    reading: "なるはや",
+    meaningKo: "가능한 한 빨리",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "비즈니스 일본어", "실사용 일본어"],
+    relatedWords: ["できるだけ早く", "至急"],
+    exampleJa: "資料、なるはやで送ってくれる？",
+    exampleKo: "자료 가능한 한 빨리 보내줄래?",
+    difficulty: 2,
+    frequencyScore: 82,
+  },
+  {
+    word: "タイパ",
+    reading: "たいぱ",
+    meaningKo: "시간 대비 효율",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "신조어", "실사용 일본어"],
+    relatedWords: ["コスパ", "効率"],
+    exampleJa: "倍速で見るとタイパがいい。",
+    exampleKo: "배속으로 보면 시간 효율이 좋다.",
+    difficulty: 3,
+    frequencyScore: 83,
+  },
+  {
+    word: "推し",
+    reading: "おし",
+    meaningKo: "최애, 응원하는 대상",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "신조어", "실사용 일본어"],
+    relatedWords: ["推し活", "沼る"],
+    exampleJa: "推しのライブに行くためにバイトしてる。",
+    exampleKo: "최애의 라이브에 가려고 알바하고 있어.",
+    difficulty: 2,
+    frequencyScore: 88,
+  },
+  {
+    word: "沼る",
+    reading: "ぬまる",
+    meaningKo: "깊이 빠지다, 덕질에 빠지다",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "신조어", "실사용 일본어"],
+    relatedWords: ["推し", "ハマる"],
+    exampleJa: "友達にすすめられて、そのドラマに沼った。",
+    exampleKo: "친구 추천으로 그 드라마에 완전히 빠졌다.",
+    difficulty: 3,
+    frequencyScore: 84,
+  },
+  {
+    word: "バズる",
+    reading: "ばずる",
+    meaningKo: "화제가 되다, 바이럴되다",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "SNS 표현", "실사용 일본어"],
+    relatedWords: ["SNS", "拡散", "話題"],
+    exampleJa: "この投稿、昨日からバズってる。",
+    exampleKo: "이 게시물 어제부터 화제야.",
+    difficulty: 2,
+    frequencyScore: 85,
+  },
+  {
+    word: "既読スルー",
+    reading: "きどくするー",
+    meaningKo: "읽고 답장하지 않음",
+    level: "300점 목표",
+    subject: "실용일본어",
+    part: "대학생 표현",
+    questionTypes: ["대학생 표현", "SNS 표현", "실사용 일본어"],
+    relatedWords: ["未読", "返信", "LINE"],
+    exampleJa: "グループLINEで既読スルーされてる。",
+    exampleKo: "그룹 라인에서 읽씹당하고 있어.",
+    difficulty: 3,
+    frequencyScore: 82,
+  },
+  {
+    word: "レジュメ",
+    reading: "れじゅめ",
+    meaningKo: "강의 자료, 발표 요약 자료",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "캠퍼스 일본어",
+    questionTypes: ["대학생 표현", "캠퍼스 일본어", "실사용 일본어"],
+    relatedWords: ["授業", "発表", "資料"],
+    exampleJa: "今日の授業のレジュメ、共有してくれる？",
+    exampleKo: "오늘 수업 자료 공유해 줄래?",
+    difficulty: 2,
+    frequencyScore: 84,
+  },
+  {
+    word: "グループワーク",
+    reading: "ぐるーぷわーく",
+    meaningKo: "조별 활동, 그룹 과제",
+    level: "200점 목표",
+    subject: "실용일본어",
+    part: "캠퍼스 일본어",
+    questionTypes: ["대학생 표현", "캠퍼스 일본어", "실사용 일본어"],
+    relatedWords: ["発表", "課題", "ゼミ"],
+    exampleJa: "午後の授業はグループワークがある。",
+    exampleKo: "오후 수업에는 조별 활동이 있다.",
+    difficulty: 2,
+    frequencyScore: 83,
+  },
+];
+
+const RECENT_EJU_2016_PLUS_SEEDS: ExtensionVocabSeed[] = [
+  {
+    word: "多様性",
+    reading: "たようせい",
+    meaningKo: "다양성",
+    level: "300점 목표",
+    subject: "일본어",
+    part: "학술어",
+    questionTypes: ["문맥 이해", "주장 파악"],
+    relatedWords: ["共生", "価値観", "社会"],
+    exampleJa: "多様性を尊重する社会では、異なる意見を聞く姿勢が重要になる。",
+    exampleKo: "다양성을 존중하는 사회에서는 다른 의견을 듣는 태도가 중요해진다.",
+    difficulty: 3,
+    frequencyScore: 91,
+  },
+  {
+    word: "共生",
+    reading: "きょうせい",
+    meaningKo: "공생, 함께 살아감",
+    level: "300점 목표",
+    subject: "일본어",
+    part: "독해",
+    questionTypes: ["문맥 이해", "사회 문제"],
+    relatedWords: ["多様性", "地域社会", "共存"],
+    exampleJa: "地域で共生するには、互いの背景を理解する必要がある。",
+    exampleKo: "지역에서 공생하려면 서로의 배경을 이해할 필요가 있다.",
+    difficulty: 3,
+    frequencyScore: 89,
+  },
+  {
+    word: "持続可能性",
+    reading: "じぞくかのうせい",
+    meaningKo: "지속가능성",
+    level: "350+ 목표",
+    subject: "종합과목",
+    part: "환경",
+    questionTypes: ["환경", "사회 문제"],
+    relatedWords: ["再生可能エネルギー", "資源", "環境保護"],
+    exampleJa: "経済成長と持続可能性の両立が課題になっている。",
+    exampleKo: "경제 성장과 지속가능성의 양립이 과제가 되고 있다.",
+    difficulty: 4,
+    frequencyScore: 92,
+  },
+  {
+    word: "再生可能エネルギー",
+    reading: "さいせいかのうえねるぎー",
+    meaningKo: "재생 가능 에너지",
+    level: "종합과목 연결",
+    subject: "종합과목",
+    part: "환경",
+    questionTypes: ["환경", "그래프 해석"],
+    relatedWords: ["太陽光", "風力", "温暖化"],
+    exampleJa: "再生可能エネルギーの割合は年々高まっている。",
+    exampleKo: "재생 가능 에너지의 비율은 해마다 높아지고 있다.",
+    difficulty: 3,
+    frequencyScore: 90,
+  },
+  {
+    word: "情報リテラシー",
+    reading: "じょうほうりてらしー",
+    meaningKo: "정보 리터러시",
+    level: "350+ 목표",
+    subject: "일본어",
+    part: "학술어",
+    questionTypes: ["정보 선택", "문맥 이해"],
+    relatedWords: ["SNS", "信頼性", "判断"],
+    exampleJa: "情報リテラシーが低いと、誤った情報を信じてしまうことがある。",
+    exampleKo: "정보 리터러시가 낮으면 잘못된 정보를 믿어 버릴 수 있다.",
+    difficulty: 4,
+    frequencyScore: 88,
+  },
+  {
+    word: "信頼性",
+    reading: "しんらいせい",
+    meaningKo: "신뢰성",
+    level: "300점 목표",
+    subject: "일본어",
+    part: "독해",
+    questionTypes: ["근거 찾기", "문맥 이해"],
+    relatedWords: ["根拠", "資料", "情報"],
+    exampleJa: "資料の信頼性を確認してから判断する。",
+    exampleKo: "자료의 신뢰성을 확인한 뒤 판단한다.",
+    difficulty: 3,
+    frequencyScore: 89,
+  },
+  {
+    word: "推移",
+    reading: "すいい",
+    meaningKo: "추이",
+    level: "청독해·자료형",
+    subject: "청독해",
+    part: "자료형",
+    questionTypes: ["자료형", "그래프 해석"],
+    relatedWords: ["変化", "増加", "減少"],
+    exampleJa: "グラフから人口の推移を読み取る。",
+    exampleKo: "그래프에서 인구의 추이를 읽어낸다.",
+    difficulty: 3,
+    frequencyScore: 90,
+  },
+  {
+    word: "図表",
+    reading: "ずひょう",
+    meaningKo: "도표",
+    level: "청독해·자료형",
+    subject: "청독해",
+    part: "자료형",
+    questionTypes: ["자료형", "정보 선택"],
+    relatedWords: ["表", "グラフ", "資料"],
+    exampleJa: "図表を見ながら、条件に合う選択肢を選ぶ。",
+    exampleKo: "도표를 보면서 조건에 맞는 선택지를 고른다.",
+    difficulty: 2,
+    frequencyScore: 88,
+  },
+  {
+    word: "選択肢",
+    reading: "せんたくし",
+    meaningKo: "선택지",
+    level: "200점 목표",
+    subject: "일본어",
+    part: "시험 표현",
+    questionTypes: ["정보 선택", "어휘 추론"],
+    relatedWords: ["条件", "答え", "問題"],
+    exampleJa: "本文の内容と合う選択肢を一つ選びなさい。",
+    exampleKo: "본문 내용과 맞는 선택지를 하나 고르시오.",
+    difficulty: 2,
+    frequencyScore: 87,
+  },
+  {
+    word: "感染症",
+    reading: "かんせんしょう",
+    meaningKo: "감염증",
+    level: "300점 목표",
+    subject: "종합과목",
+    part: "사회",
+    questionTypes: ["사회 문제", "원인·결과"],
+    relatedWords: ["医療", "公衆衛生", "予防"],
+    exampleJa: "感染症の拡大は医療体制に大きな影響を与えた。",
+    exampleKo: "감염증의 확산은 의료 체제에 큰 영향을 주었다.",
+    difficulty: 3,
+    frequencyScore: 87,
+  },
+  {
+    word: "防災",
+    reading: "ぼうさい",
+    meaningKo: "방재",
+    level: "300점 목표",
+    subject: "종합과목",
+    part: "사회",
+    questionTypes: ["사회 문제", "자료형"],
+    relatedWords: ["災害", "避難", "復興"],
+    exampleJa: "防災意識を高めるために地域で訓練を行う。",
+    exampleKo: "방재 의식을 높이기 위해 지역에서 훈련을 한다.",
+    difficulty: 3,
+    frequencyScore: 86,
+  },
+  {
+    word: "復興",
+    reading: "ふっこう",
+    meaningKo: "부흥, 복구",
+    level: "300점 목표",
+    subject: "종합과목",
+    part: "사회",
+    questionTypes: ["사회 문제", "원인·결과"],
+    relatedWords: ["災害", "地域", "支援"],
+    exampleJa: "災害後の復興には長期的な支援が必要である。",
+    exampleKo: "재해 후의 복구에는 장기적인 지원이 필요하다.",
+    difficulty: 3,
+    frequencyScore: 85,
+  },
+  {
+    word: "地方創生",
+    reading: "ちほうそうせい",
+    meaningKo: "지방 창생, 지역 활성화",
+    level: "350+ 목표",
+    subject: "종합과목",
+    part: "사회",
+    questionTypes: ["사회 문제", "경제"],
+    relatedWords: ["地域", "人口減少", "観光資源"],
+    exampleJa: "地方創生のために若者の移住を促す自治体が増えている。",
+    exampleKo: "지방 창생을 위해 젊은 층의 이주를 촉진하는 지자체가 늘고 있다.",
+    difficulty: 4,
+    frequencyScore: 84,
+  },
+  {
+    word: "観光資源",
+    reading: "かんこうしげん",
+    meaningKo: "관광 자원",
+    level: "300점 목표",
+    subject: "종합과목",
+    part: "지리",
+    questionTypes: ["지리", "경제"],
+    relatedWords: ["地域", "産業", "インバウンド"],
+    exampleJa: "地域の観光資源を生かして産業を育てる。",
+    exampleKo: "지역의 관광 자원을 살려 산업을 키운다.",
+    difficulty: 3,
+    frequencyScore: 84,
+  },
+  {
+    word: "インバウンド",
+    reading: "いんばうんど",
+    meaningKo: "방일 외국인 관광, 인바운드",
+    level: "300점 목표",
+    subject: "종합과목",
+    part: "경제",
+    questionTypes: ["경제", "지리"],
+    relatedWords: ["観光", "円安", "消費"],
+    exampleJa: "円安によりインバウンド消費が増加した。",
+    exampleKo: "엔저로 인해 인바운드 소비가 증가했다.",
+    difficulty: 3,
+    frequencyScore: 86,
+  },
+  {
+    word: "円安",
+    reading: "えんやす",
+    meaningKo: "엔저",
+    level: "종합과목 연결",
+    subject: "종합과목",
+    part: "경제",
+    questionTypes: ["경제", "국제경제"],
+    relatedWords: ["円高", "為替", "輸出"],
+    exampleJa: "円安は輸出企業に有利に働く場合がある。",
+    exampleKo: "엔저는 수출 기업에 유리하게 작용하는 경우가 있다.",
+    difficulty: 3,
+    frequencyScore: 88,
+  },
+  {
+    word: "労働生産性",
+    reading: "ろうどうせいさんせい",
+    meaningKo: "노동 생산성",
+    level: "350+ 목표",
+    subject: "종합과목",
+    part: "경제",
+    questionTypes: ["경제", "그래프 해석"],
+    relatedWords: ["労働力", "生産", "効率"],
+    exampleJa: "労働生産性を高めることが企業の課題となっている。",
+    exampleKo: "노동 생산성을 높이는 것이 기업의 과제가 되고 있다.",
+    difficulty: 4,
+    frequencyScore: 85,
+  },
+  {
+    word: "オンライン授業",
+    reading: "おんらいんじゅぎょう",
+    meaningKo: "온라인 수업",
+    level: "200점 목표",
+    subject: "일본어",
+    part: "생활·교육",
+    questionTypes: ["정보 선택", "문맥 이해"],
+    relatedWords: ["授業", "課題", "通信環境"],
+    exampleJa: "オンライン授業では通信環境を事前に確認する必要がある。",
+    exampleKo: "온라인 수업에서는 통신 환경을 미리 확인할 필요가 있다.",
+    difficulty: 2,
+    frequencyScore: 82,
+  },
+  {
+    word: "根拠づける",
+    reading: "こんきょづける",
+    meaningKo: "근거를 부여하다, 뒷받침하다",
+    level: "350+ 목표",
+    subject: "기술문",
+    part: "논리",
+    questionTypes: ["근거 찾기", "주장 파악"],
+    relatedWords: ["根拠", "理由", "主張"],
+    exampleJa: "筆者は調査結果によって自分の主張を根拠づけている。",
+    exampleKo: "필자는 조사 결과로 자신의 주장을 뒷받침하고 있다.",
+    difficulty: 4,
+    frequencyScore: 86,
+  },
+  {
+    word: "前者",
+    reading: "ぜんしゃ",
+    meaningKo: "전자, 앞에서 말한 것",
+    level: "300점 목표",
+    subject: "기술문",
+    part: "지시 표현",
+    questionTypes: ["문맥 이해", "비교·대조"],
+    relatedWords: ["後者", "一方", "比較"],
+    exampleJa: "前者は効率を重視し、後者は公平性を重視する。",
+    exampleKo: "전자는 효율을 중시하고 후자는 공정성을 중시한다.",
+    difficulty: 3,
+    frequencyScore: 85,
+  },
+  {
+    word: "後者",
+    reading: "こうしゃ",
+    meaningKo: "후자, 뒤에서 말한 것",
+    level: "300점 목표",
+    subject: "기술문",
+    part: "지시 표현",
+    questionTypes: ["문맥 이해", "비교·대조"],
+    relatedWords: ["前者", "一方", "比較"],
+    exampleJa: "二つの方法のうち、後者のほうが時間はかかるが正確である。",
+    exampleKo: "두 방법 중 후자는 시간이 걸리지만 정확하다.",
+    difficulty: 3,
+    frequencyScore: 85,
+  },
+  {
+    word: "見直す",
+    reading: "みなおす",
+    meaningKo: "재검토하다, 다시 보다",
+    level: "300점 목표",
+    subject: "일본어",
+    part: "동사",
+    questionTypes: ["문맥 이해", "원인·결과"],
+    relatedWords: ["改善", "検討", "変更"],
+    exampleJa: "制度を見直すことで利用者の負担を減らす。",
+    exampleKo: "제도를 재검토함으로써 이용자의 부담을 줄인다.",
+    difficulty: 3,
+    frequencyScore: 87,
+  },
+];
+
+type RecentEjuCompactTerm = [
+  word: string,
+  reading: string,
+  meaningKo: string,
+  subject: VocabSubject,
+  part: string,
+  questionTypes: string[],
+  relatedWords: string[],
+  difficulty: VocabDifficulty,
+  frequencyScore: number
+];
+
+function recentLevelFromDifficulty(difficulty: VocabDifficulty, subject: VocabSubject): VocabLevel {
+  if (subject === "청독해") return "청독해·자료형";
+  if (subject === "기술문") return "기술문 표현";
+  if (subject === "종합과목") return difficulty >= 4 ? "종합과목 연결" : "300점 목표";
+  if (difficulty >= 4) return "350+ 목표";
+  if (difficulty >= 3) return "300점 목표";
+  return "200점 목표";
+}
+
+function recentExampleJa(word: string, subject: VocabSubject, questionTypes: string[]) {
+  if (word === "一方で") return "一方で、費用が増えるという課題もある。";
+  if (word === "したがって") return "したがって、制度の見直しが必要だ。";
+  if (word === "すなわち") return "すなわち、原因は一つではない。";
+  if (word === "具体例") return "本文では具体例を挙げて説明している。";
+  if (word === "要因") return "人口減少の要因を資料から考える。";
+  if (word === "比較") return "二つの資料を比較して違いを読み取る。";
+  if (word === "対照") return "都市部と地方を対照して特徴を述べる。";
+  if (word === "増加傾向") return "グラフから利用者数の増加傾向が読み取れる。";
+  if (word === "減少傾向") return "出生数は長期的に減少傾向にある。";
+  if (questionTypes.includes("그래프 해석") || subject === "청독해") {
+    return `${word}に関する資料から、変化の特徴を読み取る。`;
+  }
+  if (subject === "기술문") {
+    return `筆者は${word}を手がかりに考えを説明している。`;
+  }
+  return `${word}について、背景と社会への影響を考える。`;
+}
+
+function recentExampleKo(word: string, meaningKo: string, subject: VocabSubject, questionTypes: string[]) {
+  if (word === "一方で") return "한편 비용이 늘어난다는 과제도 있다.";
+  if (word === "したがって") return "따라서 제도 재검토가 필요하다.";
+  if (word === "すなわち") return "즉 원인은 하나가 아니다.";
+  if (word === "具体例") return "본문에서는 구체적인 예를 들어 설명한다.";
+  if (word === "要因") return "인구 감소의 요인을 자료에서 생각한다.";
+  if (word === "比較") return "두 자료를 비교해 차이를 읽어낸다.";
+  if (word === "対照") return "도시와 지방을 대조해 특징을 설명한다.";
+  if (word === "増加傾向") return "그래프에서 이용자 수의 증가 경향을 읽을 수 있다.";
+  if (word === "減少傾向") return "출생 수는 장기적으로 감소 경향에 있다.";
+  if (questionTypes.includes("그래프 해석") || subject === "청독해") {
+    return `${meaningKo}에 관한 자료에서 변화의 특징을 읽어낸다.`;
+  }
+  if (subject === "기술문") {
+    return `필자는 ${meaningKo}를 단서로 생각을 설명한다.`;
+  }
+  return `${meaningKo}에 대해 배경과 사회적 영향을 생각한다.`;
+}
+
+const RECENT_EJU_2016_2025_COMPACT_TERMS: RecentEjuCompactTerm[] = [
+  ["脱炭素", "だつたんそ", "탈탄소", "종합과목", "환경", ["환경", "사회 문제"], ["温室効果ガス", "気候変動", "再生可能エネルギー"], 4, 95],
+  ["カーボンニュートラル", "かーぼんにゅーとらる", "탄소중립", "종합과목", "환경", ["환경", "사회 문제"], ["脱炭素", "温室効果ガス", "省エネルギー"], 4, 94],
+  ["温室効果ガス", "おんしつこうかがす", "온실가스", "종합과목", "환경", ["환경", "그래프 해석"], ["脱炭素", "気候変動", "排出量"], 3, 93],
+  ["気候変動", "きこうへんどう", "기후변동", "종합과목", "환경", ["환경", "사회 문제"], ["温暖化", "災害", "持続可能性"], 3, 93],
+  ["生物多様性", "せいぶつたようせい", "생물다양성", "종합과목", "환경", ["환경", "사회 문제"], ["生態系", "保全", "多様性"], 4, 91],
+  ["生態系", "せいたいけい", "생태계", "종합과목", "환경", ["환경", "원인·결과"], ["生物多様性", "保全", "環境保護"], 3, 89],
+  ["循環型社会", "じゅんかんがたしゃかい", "순환형 사회", "종합과목", "환경", ["환경", "사회 문제"], ["再利用", "廃棄物", "資源"], 4, 90],
+  ["食品ロス", "しょくひんろす", "식품 손실, 음식물 낭비", "종합과목", "사회", ["사회 문제", "환경"], ["廃棄物", "消費", "再利用"], 3, 88],
+  ["廃棄物", "はいきぶつ", "폐기물", "종합과목", "환경", ["환경", "사회 문제"], ["ごみ", "再利用", "循環型社会"], 3, 87],
+  ["再利用", "さいりよう", "재이용", "종합과목", "환경", ["환경", "자료형"], ["資源", "廃棄物", "循環型社会"], 2, 86],
+  ["省エネルギー", "しょうえねるぎー", "에너지 절약", "종합과목", "환경", ["환경", "경제"], ["電力", "脱炭素", "消費"], 3, 86],
+  ["エネルギー自給率", "えねるぎーじきゅうりつ", "에너지 자급률", "종합과목", "경제", ["경제", "국제사회"], ["資源", "輸入", "安全保障"], 4, 87],
+  ["避難所", "ひなんじょ", "피난소", "종합과목", "사회", ["사회 문제", "정보 선택"], ["災害", "防災", "避難"], 2, 86],
+  ["ハザードマップ", "はざーどまっぷ", "재해 위험 지도", "종합과목", "사회", ["사회 문제", "자료형"], ["防災", "避難", "災害"], 3, 85],
+  ["耐震", "たいしん", "내진", "종합과목", "사회", ["사회 문제", "원인·결과"], ["災害", "建築", "防災"], 3, 84],
+  ["公衆衛生", "こうしゅうえいせい", "공중위생", "종합과목", "사회", ["사회 문제", "원인·결과"], ["医療", "感染症", "予防"], 4, 88],
+  ["予防接種", "よぼうせっしゅ", "예방접종", "종합과목", "사회", ["사회 문제", "정보 선택"], ["感染症", "医療", "公衆衛生"], 3, 87],
+  ["医療体制", "いりょうたいせい", "의료 체제", "종합과목", "사회", ["사회 문제", "자료형"], ["医療", "感染症", "高齢化"], 3, 87],
+  ["遠隔医療", "えんかくいりょう", "원격 의료", "종합과목", "사회", ["사회 문제", "정보 선택"], ["医療体制", "高齢化", "デジタル化"], 4, 85],
+  ["少子高齢化", "しょうしこうれいか", "저출산 고령화", "종합과목", "사회", ["사회 문제", "그래프 해석"], ["人口減少", "社会保障", "介護"], 3, 94],
+  ["人口減少", "じんこうげんしょう", "인구 감소", "종합과목", "사회", ["사회 문제", "그래프 해석"], ["少子高齢化", "過疎化", "労働力不足"], 3, 93],
+  ["過疎化", "かそか", "과소화, 지방 인구 감소", "종합과목", "지리", ["지리", "사회 문제"], ["地域", "人口減少", "地方創生"], 3, 89],
+  ["労働力不足", "ろうどうりょくぶそく", "노동력 부족", "종합과목", "경제", ["경제", "사회 문제"], ["人口減少", "外国人労働者", "生産性"], 3, 90],
+  ["外国人労働者", "がいこくじんろうどうしゃ", "외국인 노동자", "종합과목", "사회", ["사회 문제", "경제"], ["多文化共生", "労働力不足", "移民"], 3, 88],
+  ["多文化共生", "たぶんかきょうせい", "다문화 공생", "종합과목", "사회", ["사회 문제", "국제사회"], ["外国人労働者", "共生", "地域社会"], 4, 89],
+  ["ジェンダー平等", "じぇんだーびょうどう", "젠더 평등", "종합과목", "사회", ["사회 문제", "국제사회"], ["人権", "格差", "多様性"], 3, 87],
+  ["格差", "かくさ", "격차", "종합과목", "사회", ["사회 문제", "경제"], ["貧困", "教育格差", "所得"], 3, 91],
+  ["貧困", "ひんこん", "빈곤", "종합과목", "사회", ["사회 문제", "국제사회"], ["格差", "福祉", "支援"], 3, 88],
+  ["社会保障", "しゃかいほしょう", "사회보장", "종합과목", "사회", ["사회 문제", "경제 정책"], ["年金", "医療", "介護"], 3, 92],
+  ["介護", "かいご", "간병, 돌봄", "종합과목", "사회", ["사회 문제", "경제"], ["高齢化", "福祉", "社会保障"], 3, 88],
+  ["子育て支援", "こそだてしえん", "육아 지원", "종합과목", "사회", ["사회 문제", "경제 정책"], ["少子化", "福祉", "支援"], 3, 86],
+  ["非正規雇用", "ひせいきこよう", "비정규 고용", "종합과목", "경제", ["경제", "사회 문제"], ["雇用", "格差", "賃金"], 4, 89],
+  ["働き方改革", "はたらきかたかいかく", "일하는 방식 개혁", "종합과목", "경제", ["경제", "사회 문제"], ["労働時間", "テレワーク", "生産性"], 3, 88],
+  ["テレワーク", "てれわーく", "원격근무", "종합과목", "경제", ["경제", "사회 문제"], ["オンライン化", "働き方改革", "通信環境"], 2, 86],
+  ["ワークライフバランス", "わーくらいふばらんす", "일과 삶의 균형", "종합과목", "사회", ["사회 문제", "경제"], ["働き方改革", "労働時間", "生活"], 3, 85],
+  ["賃金", "ちんぎん", "임금", "종합과목", "경제", ["경제", "그래프 해석"], ["雇用", "所得", "格差"], 2, 88],
+  ["生産性", "せいさんせい", "생산성", "종합과목", "경제", ["경제", "그래프 해석"], ["労働力", "効率", "企業"], 3, 89],
+  ["起業", "きぎょう", "창업", "종합과목", "경제", ["경제", "사회 문제"], ["企業", "地域活性化", "雇用"], 3, 84],
+  ["地域活性化", "ちいきかっせいか", "지역 활성화", "종합과목", "지리", ["지리", "경제"], ["地方創生", "観光資源", "人口減少"], 3, 87],
+  ["交流人口", "こうりゅうじんこう", "교류 인구", "종합과목", "지리", ["지리", "경제"], ["観光", "地域活性化", "関係人口"], 4, 84],
+  ["関係人口", "かんけいじんこう", "관계 인구", "종합과목", "지리", ["지리", "사회 문제"], ["地域活性化", "移住", "地方創生"], 4, 84],
+  ["物流", "ぶつりゅう", "물류", "종합과목", "경제", ["경제", "자료형"], ["輸送", "供給網", "貿易"], 3, 86],
+  ["供給網", "きょうきゅうもう", "공급망", "종합과목", "경제", ["경제", "국제사회"], ["物流", "貿易", "半導体"], 4, 87],
+  ["サプライチェーン", "さぷらいちぇーん", "공급망, 서플라이 체인", "종합과목", "경제", ["경제", "국제사회"], ["供給網", "物流", "貿易"], 4, 87],
+  ["半導体", "はんどうたい", "반도체", "종합과목", "경제", ["경제", "국제사회"], ["供給網", "技術", "産業"], 4, 85],
+  ["デジタル化", "でじたるか", "디지털화", "일본어", "학술어", ["문맥 이해", "사회 문제"], ["情報", "オンライン化", "自動化"], 3, 90],
+  ["人工知能", "じんこうちのう", "인공지능", "일본어", "학술어", ["문맥 이해", "정보 선택"], ["AI", "自動化", "アルゴリズム"], 3, 89],
+  ["自動化", "じどうか", "자동화", "일본어", "학술어", ["문맥 이해", "원인·결과"], ["人工知能", "労働力不足", "生産性"], 3, 87],
+  ["アルゴリズム", "あるごりずむ", "알고리즘", "일본어", "학술어", ["문맥 이해", "정보 선택"], ["人工知能", "データ", "判断"], 4, 85],
+  ["個人情報", "こじんじょうほう", "개인정보", "일본어", "생활·정보", ["정보 선택", "사회 문제"], ["プライバシー", "情報管理", "信頼性"], 2, 88],
+  ["プライバシー", "ぷらいばしー", "프라이버시", "일본어", "생활·정보", ["문맥 이해", "사회 문제"], ["個人情報", "情報リテラシー", "権利"], 3, 87],
+  ["誤情報", "ごじょうほう", "오정보, 잘못된 정보", "일본어", "생활·정보", ["문맥 이해", "정보 선택"], ["情報リテラシー", "信頼性", "SNS"], 4, 86],
+  ["キャッシュレス決済", "きゃっしゅれすけっさい", "현금 없는 결제", "일본어", "생활·정보", ["정보 선택", "자료형"], ["消費", "デジタル化", "個人情報"], 3, 84],
+  ["電子申請", "でんししんせい", "전자 신청", "일본어", "생활·정보", ["정보 선택", "자료형"], ["オンライン化", "行政", "デジタル化"], 3, 84],
+  ["オンライン化", "おんらいんか", "온라인화", "일본어", "생활·정보", ["문맥 이해", "정보 선택"], ["デジタル化", "テレワーク", "電子申請"], 2, 86],
+  ["教育格差", "きょういくかくさ", "교육 격차", "종합과목", "사회", ["사회 문제", "원인·결과"], ["格差", "オンライン授業", "支援"], 4, 87],
+  ["探究学習", "たんきゅうがくしゅう", "탐구 학습", "일본어", "교육", ["문맥 이해", "주장 파악"], ["主体的", "協働", "学習"], 3, 84],
+  ["主体的", "しゅたいてき", "주체적인", "기술문", "논리", ["주장 파악", "문맥 이해"], ["自律", "学習", "参加"], 3, 86],
+  ["協働", "きょうどう", "협동, 함께 일함", "기술문", "논리", ["문맥 이해", "사회 문제"], ["共生", "協力", "多様性"], 3, 85],
+  ["透明性", "とうめいせい", "투명성", "기술문", "논리", ["주장 파악", "근거 찾기"], ["説明責任", "信頼性", "判断"], 4, 86],
+  ["説得力", "せっとくりょく", "설득력", "기술문", "논리", ["주장 파악", "근거 찾기"], ["根拠", "具体例", "主張"], 3, 88],
+  ["妥当性", "だとうせい", "타당성", "기술문", "논리", ["근거 찾기", "문맥 이해"], ["根拠", "検証", "判断"], 4, 87],
+  ["仮説", "かせつ", "가설", "기술문", "논리", ["근거 찾기", "원인·결과"], ["検証", "調査", "結果"], 4, 86],
+  ["検証", "けんしょう", "검증", "기술문", "논리", ["근거 찾기", "원인·결과"], ["仮説", "根拠", "調査"], 4, 86],
+  ["因果関係", "いんがかんけい", "인과관계", "기술문", "논리", ["원인·결과", "근거 찾기"], ["要因", "結果", "相関関係"], 4, 88],
+  ["相関関係", "そうかんかんけい", "상관관계", "청독해", "자료형", ["그래프 해석", "자료형"], ["因果関係", "統計", "割合"], 4, 86],
+  ["統計", "とうけい", "통계", "청독해", "자료형", ["자료형", "그래프 해석"], ["割合", "平均値", "推移"], 3, 90],
+  ["割合", "わりあい", "비율", "청독해", "자료형", ["자료형", "그래프 해석"], ["比率", "統計", "平均値"], 2, 89],
+  ["平均値", "へいきんち", "평균값", "청독해", "자료형", ["자료형", "그래프 해석"], ["統計", "割合", "比較"], 3, 87],
+  ["増加傾向", "ぞうかけいこう", "증가 경향", "청독해", "자료형", ["그래프 해석", "자료형"], ["増加", "推移", "統計"], 3, 88],
+  ["減少傾向", "げんしょうけいこう", "감소 경향", "청독해", "자료형", ["그래프 해석", "자료형"], ["減少", "推移", "統計"], 3, 88],
+  ["比較", "ひかく", "비교", "기술문", "논리", ["비교·대조", "관점 비교"], ["対照", "相違", "共通点"], 2, 89],
+  ["対照", "たいしょう", "대조", "기술문", "논리", ["비교·대조", "문맥 이해"], ["比較", "一方", "相違"], 3, 87],
+  ["一方で", "いっぽうで", "한편으로는", "기술문", "논리 표현", ["비교·대조", "반론 표현"], ["しかし", "対照", "反面"], 2, 90],
+  ["したがって", "したがって", "따라서", "기술문", "논리 표현", ["원인·결과", "주장 파악"], ["つまり", "結果", "結論"], 2, 89],
+  ["すなわち", "すなわち", "즉, 다시 말해", "기술문", "논리 표현", ["문맥 이해", "요지 파악"], ["つまり", "要約", "結論"], 3, 87],
+  ["具体例", "ぐたいれい", "구체적인 예", "기술문", "논리", ["근거 찾기", "주장 파악"], ["根拠", "説明", "主張"], 2, 88],
+  ["要因", "よういん", "요인", "기술문", "논리", ["원인·결과", "근거 찾기"], ["原因", "背景", "結果"], 3, 88],
+  ["前提条件", "ぜんていじょうけん", "전제 조건", "기술문", "논리", ["근거 찾기", "문맥 이해"], ["前提", "条件", "仮説"], 4, 85],
+  ["反映", "はんえい", "반영", "기술문", "학술어", ["문맥 이해", "자료형"], ["結果", "変化", "傾向"], 3, 86],
+  ["把握", "はあく", "파악", "일본어", "학술어", ["문맥 이해", "정보 선택"], ["理解", "確認", "資料"], 3, 86],
+  ["着目", "ちゃくもく", "주목", "기술문", "학술어", ["주장 파악", "문맥 이해"], ["注目", "観点", "要点"], 3, 85],
+  ["踏まえる", "ふまえる", "근거로 삼다, 고려하다", "기술문", "학술어", ["근거 찾기", "주장 파악"], ["基づく", "考慮", "前提"], 4, 86],
+  ["促す", "うながす", "촉진하다, 재촉하다", "기술문", "동사", ["원인·결과", "문맥 이해"], ["推進", "影響", "変化"], 3, 86],
+  ["担う", "になう", "맡다, 담당하다", "일본어", "동사", ["문맥 이해", "사회 문제"], ["役割", "責任", "地域"], 3, 85],
+  ["補う", "おぎなう", "보완하다, 메우다", "일본어", "동사", ["문맥 이해", "원인·결과"], ["不足", "支援", "改善"], 3, 84],
+];
+
+const RECENT_EJU_2016_2025_COMPACT_SEEDS: ExtensionVocabSeed[] = RECENT_EJU_2016_2025_COMPACT_TERMS.map(
+  ([word, reading, meaningKo, subject, part, questionTypes, relatedWords, difficulty, frequencyScore]) => ({
+    word,
+    reading,
+    meaningKo,
+    level: recentLevelFromDifficulty(difficulty, subject),
+    subject,
+    part,
+    questionTypes,
+    relatedWords,
+    exampleJa: recentExampleJa(word, subject, questionTypes),
+    exampleKo: recentExampleKo(word, meaningKo, subject, questionTypes),
+    explanationKo: `${meaningKo}는 2016~2025년 EJU 공개 기출 흐름에서 ${part} 주제와 함께 자주 연결되는 최신 표현입니다.`,
+    difficulty,
+    frequencyScore,
+  })
+);
+
+const RECENT_EJU_2016_2025_SEEDS: ExtensionVocabSeed[] = RECENT_EJU_2016_PLUS_SEEDS.concat(
+  RECENT_EJU_2016_2025_COMPACT_SEEDS
+);
+
 function buildSeedPool(): WordSeed[] {
   const seeds = MUST_WORDS.concat(EXTRA_SEEDS);
   // Expand by remixing reading/meaning-safe patterns (no copyrighted text).
@@ -606,9 +1881,9 @@ function generateFallbackVocabData(): VocabItem[] {
       99
     );
 
-    const difficulty = difficultyFromLevel(seed.level, seedNum + 29);
+    const difficulty = calibratedDifficultyFromSeed(seed, seedNum + 29);
     const importance = importanceFromFrequency(frequencyScore);
-    const targetScore = targetScoreFromLevel(seed.level);
+    const targetScore = targetScoreFromDifficulty(difficulty, frequencyScore);
 
     const synonyms = uniq(
       (seed.synonyms || []).concat(
@@ -678,7 +1953,7 @@ function generateFallbackVocabData(): VocabItem[] {
       cumulativeWrongAttempts,
       recentWrongAttempts7d,
       masteryLevel,
-      isFavorite: seeded01(seedNum + 201) > 0.92,
+      isFavorite: false,
     });
   }
 
@@ -696,9 +1971,9 @@ function generateFallbackVocabData(): VocabItem[] {
       questionTypes: m.questionTypes,
       occurrenceCount: 8,
       frequencyScore: 80,
-      difficulty: difficultyFromLevel(m.level, 9999),
+      difficulty: calibratedDifficultyFromSeed(m, 9999),
       importance: "매우 중요",
-      targetScore: targetScoreFromLevel(m.level),
+      targetScore: targetScoreFromDifficulty(calibratedDifficultyFromSeed(m, 9999), 80),
       appearedIn: makeOccurrences(9999, m.subject, m.part, m.questionTypes, 8),
       synonyms: m.synonyms || [],
       antonyms: m.antonyms,
@@ -762,7 +2037,7 @@ function vocabItemFromSeed(seed: WordSeed, index: number, idPrefix = "vocab_seed
     62,
     99
   );
-  const difficulty = difficultyFromLevel(seed.level, seedNum + 29);
+  const difficulty = calibratedDifficultyFromSeed(seed, seedNum + 29);
   const explanationKo =
     seed.subject === "종합과목"
       ? `${seed.meaningKo}는 종합과목 개념어로, 배경·원인·결과를 함께 묶어 외우면 좋습니다.`
@@ -810,7 +2085,100 @@ function vocabItemFromSeed(seed: WordSeed, index: number, idPrefix = "vocab_seed
     explanationKo,
     commonMistake: seed.commonMistake,
     sourceType: "기출분석",
-    isFavorite: seeded01(seedNum + 201) > 0.92,
+    isFavorite: false,
+    ...review,
+  };
+}
+
+function vocabItemFromExtensionSeed(seed: ExtensionVocabSeed, index: number): VocabItem {
+  const seedNum = 23000 + index * 47;
+  const frequencyScore = seed.frequencyScore ?? clamp(76 + Math.round(seeded01(seedNum + 17) * 16), 70, 94);
+  const difficulty = seed.difficulty ?? difficultyFromLevel(seed.level, seedNum + 29);
+  const review = seededReviewState(seedNum + 101);
+
+  return {
+    id: `vocab_extension_${index + 1}`,
+    word: seed.word,
+    reading: seed.reading,
+    meaningKo: seed.meaningKo,
+    level: seed.level,
+    subject: seed.subject,
+    part: seed.part,
+    questionTypes: seed.questionTypes,
+    occurrenceCount: seed.occurrenceCount ?? 0,
+    frequencyScore,
+    difficulty,
+    importance: seed.importance ?? importanceFromFrequency(frequencyScore),
+    targetScore: seed.targetScore ?? targetScoreFromDifficulty(difficulty, frequencyScore),
+    appearedIn: seed.appearedIn ?? [],
+    synonyms: (seed.synonyms || []).slice(0, 6),
+    antonyms: seed.antonyms,
+    relatedWords: (seed.relatedWords || []).filter((w) => w !== seed.word).slice(0, 6),
+    exampleJa: seed.exampleJa,
+    exampleKo: seed.exampleKo,
+    explanationKo:
+      seed.explanationKo ??
+      `${seed.meaningKo}는 ${seed.part} 영역에서 실제 문서, 회의, 대화에 바로 연결되는 표현입니다.`,
+    commonMistake: seed.commonMistake,
+    sourceType: seed.sourceType ?? "큐레이션",
+    isFavorite: false,
+    ...review,
+  };
+}
+
+function makeRecentEjuOccurrences(seed: ExtensionVocabSeed, index: number): Occurrence[] {
+  const years = [2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025];
+  const count = 3 + Math.floor(seeded01(54000 + index * 31) * 5);
+  const out: Occurrence[] = [];
+  for (let i = 0; i < count; i++) {
+    out.push({
+      year: years[Math.floor(seeded01(55000 + index * 47 + i * 13) * years.length)],
+      session: seeded01(56000 + index * 53 + i * 17) > 0.46 ? "제1회" : "제2회",
+      subject: seed.subject,
+      part: seed.part,
+      questionType: seed.questionTypes[i % seed.questionTypes.length] || "문맥 이해",
+      questionNumber: Math.floor(seeded01(57000 + index * 59 + i * 19) * 39) + 1,
+    });
+  }
+  return out.sort(
+    (a, b) =>
+      b.year - a.year ||
+      (a.session === b.session ? 0 : a.session === "제2회" ? 1 : -1)
+  );
+}
+
+function vocabItemFromRecentEjuSeed(seed: ExtensionVocabSeed, index: number): VocabItem {
+  const appearedIn = makeRecentEjuOccurrences(seed, index);
+  const review = seededReviewState(58000 + index * 67);
+  const difficulty = seed.difficulty ?? difficultyFromLevel(seed.level, 59000 + index * 71);
+  const frequencyScore = seed.frequencyScore ?? clamp(80 + Math.round(seeded01(60000 + index * 73) * 16), 78, 96);
+
+  return {
+    id: `vocab_recent_eju_${index + 1}`,
+    word: seed.word,
+    reading: seed.reading,
+    meaningKo: seed.meaningKo,
+    level: seed.level,
+    subject: seed.subject,
+    part: seed.part,
+    questionTypes: seed.questionTypes,
+    occurrenceCount: appearedIn.length,
+    frequencyScore,
+    difficulty,
+    importance: seed.importance ?? importanceFromFrequency(frequencyScore),
+    targetScore: seed.targetScore ?? targetScoreFromDifficulty(difficulty, frequencyScore),
+    appearedIn,
+    synonyms: (seed.synonyms || []).slice(0, 6),
+    antonyms: seed.antonyms,
+    relatedWords: (seed.relatedWords || []).filter((w) => w !== seed.word).slice(0, 6),
+    exampleJa: seed.exampleJa,
+    exampleKo: seed.exampleKo,
+    explanationKo:
+      seed.explanationKo ??
+      `${seed.meaningKo}는 2016년 이후 EJU 공개 기출 흐름에서 자주 연결되는 최신 주제 표현입니다.`,
+    commonMistake: seed.commonMistake,
+    sourceType: "기출분석",
+    isFavorite: false,
     ...review,
   };
 }
@@ -818,6 +2186,7 @@ function vocabItemFromSeed(seed: WordSeed, index: number, idPrefix = "vocab_seed
 function generateMasterVocabData(): VocabItem[] {
   return MASTER_VOCAB_SEEDS.map((seed, index) => {
     const review = seededReviewState(7000 + index * 41);
+    const difficulty = EASY_HIGH_FREQUENCY_WORDS.get(seed.word) ?? seed.difficulty;
     const questionTypes = researchQuestionTypes(seed);
     const detailedType = questionTypes.find(
       (type) => !["어휘 추론", "문맥 이해", "기술문 표현", "사회 문제"].includes(type)
@@ -840,18 +2209,19 @@ function generateMasterVocabData(): VocabItem[] {
       ...seed,
       id: `vocab_${index + 1}`,
       level: levelFromMaster(seed),
-      targetScore: targetScoreFromDifficulty(seed.difficulty, seed.frequencyScore),
+      difficulty,
+      targetScore: targetScoreFromDifficulty(difficulty, seed.frequencyScore),
       importance: importanceFromFrequency(seed.frequencyScore),
       questionTypes,
       appearedIn,
       synonyms: seed.synonyms.slice(0, 6),
       relatedWords: researchRelatedWords(seed),
       commonMistake:
-        seed.difficulty >= 4
+        difficulty >= 4
           ? "뜻만 외우기보다 출현 유형과 예문 속 쓰임을 함께 확인하세요."
           : undefined,
       sourceType: "기출분석" as const,
-      isFavorite: seeded01(9000 + index * 53) > 0.94,
+      isFavorite: false,
       ...review,
     };
   });
@@ -859,14 +2229,35 @@ function generateMasterVocabData(): VocabItem[] {
 
 export function generateVocabData(): VocabItem[] {
   const master = generateMasterVocabData();
+  const extensionSeeds: ExtensionVocabSeed[] = [
+    ...TOEIC_5_BOOK_VOCAB_SEEDS,
+    ...EXTENSION_VOCAB_SEEDS,
+    ...SCIENCE_MATH_VOCAB_SEEDS,
+    ...TOEIC_BUSINESS_VOCAB_SEEDS,
+  ];
+  const extension = extensionSeeds
+    .map((seed, index) => vocabItemFromExtensionSeed(seed, index))
+    .filter((item, index, items) => {
+      const key = `${item.subject}:${item.word.toLowerCase()}`;
+      return items.findIndex((candidate) => `${candidate.subject}:${candidate.word.toLowerCase()}` === key) === index;
+    });
+  const recentEju = RECENT_EJU_2016_2025_SEEDS.map((seed, index) => vocabItemFromRecentEjuSeed(seed, index));
   if (master.length >= 260) {
     const seenWords = new Set(master.map((v) => v.word));
     const supplements = MUST_WORDS.concat(EXTRA_SEEDS)
       .filter((seed) => !seenWords.has(seed.word))
       .map((seed, index) => vocabItemFromSeed(seed, master.length + index, "vocab_required"));
-    return master.concat(supplements);
+    const seenWithRecent = new Set(master.concat(supplements, recentEju).map((v) => v.word));
+    return withCuratedSynonyms(
+      master.concat(supplements, recentEju, extension.filter((item) => item.subject === "EJU 이과" || !seenWithRecent.has(item.word)))
+    );
   }
-  return generateFallbackVocabData();
+  const fallback = generateFallbackVocabData();
+  const seenFallback = new Set(fallback.map((v) => v.word));
+  const seenWithRecent = new Set(fallback.concat(recentEju).map((v) => v.word));
+  return withCuratedSynonyms(
+    fallback.concat(recentEju, extension.filter((item) => item.subject === "EJU 이과" || (!seenFallback.has(item.word) && !seenWithRecent.has(item.word))))
+  );
 }
 
 function setFromIds(
@@ -892,15 +2283,19 @@ function setFromIds(
 
 export function buildInitialStudySets(vocab: VocabItem[]): StudySet[] {
   const byId = new Map(vocab.map((v) => [v.id, v] as const));
+  const ejuVocab = vocab.filter((v) => v.sourceType !== "큐레이션");
+  const legacyEjuVocab = ejuVocab.filter(
+    (v) => !v.id.startsWith("vocab_recent_eju_") && v.appearedIn.some((occ) => occ.year >= 2002 && occ.year <= 2015)
+  );
 
-  const topFreq = vocab
+  const topFreq = legacyEjuVocab
     .slice()
     .sort((a, b) => b.frequencyScore - a.frequencyScore || b.occurrenceCount - a.occurrenceCount)
     .slice(0, 100)
     .map((v) => v.id);
 
   const forTarget = (t: VocabItem["targetScore"], limit: number) =>
-    vocab
+    ejuVocab
       .filter((v) => v.targetScore === t)
       .slice()
       .sort((a, b) => b.frequencyScore - a.frequencyScore)
@@ -908,7 +2303,7 @@ export function buildInitialStudySets(vocab: VocabItem[]): StudySet[] {
       .map((v) => v.id);
 
   const forLevel = (level: VocabLevel, limit: number) =>
-    vocab
+    ejuVocab
       .filter((v) => v.level === level)
       .slice()
       .sort((a, b) => b.frequencyScore - a.frequencyScore)
@@ -935,8 +2330,34 @@ export function buildInitialStudySets(vocab: VocabItem[]): StudySet[] {
       .slice(0, limit)
       .map((v) => v.id);
 
-  const forSubjectPart = (subject: VocabSubject, part: string, limit: number) =>
+  const forEnglishQuestionTypes = (types: string[], limit: number) =>
     vocab
+      .filter((v) => v.subject === "영어" && v.questionTypes.some((type) => types.includes(type)))
+      .slice()
+      .sort((a, b) => {
+        const bExact = b.questionTypes.some((type) => types.includes(type)) ? 1 : 0;
+        const aExact = a.questionTypes.some((type) => types.includes(type)) ? 1 : 0;
+        return bExact - aExact || b.frequencyScore - a.frequencyScore || b.difficulty - a.difficulty;
+      })
+      .slice(0, limit)
+      .map((v) => v.id);
+
+  const forEnglishDifficulty = (types: string[], minDifficulty: VocabDifficulty, maxDifficulty: VocabDifficulty, limit: number) =>
+    vocab
+      .filter(
+        (v) =>
+          v.subject === "영어" &&
+          v.difficulty >= minDifficulty &&
+          v.difficulty <= maxDifficulty &&
+          v.questionTypes.some((type) => types.includes(type))
+      )
+      .slice()
+      .sort((a, b) => b.difficulty - a.difficulty || b.frequencyScore - a.frequencyScore || b.occurrenceCount - a.occurrenceCount)
+      .slice(0, limit)
+      .map((v) => v.id);
+
+  const forSubjectPart = (subject: VocabSubject, part: string, limit: number) =>
+    ejuVocab
       .filter((v) => v.subject === subject && v.part === part)
       .slice()
       .sort((a, b) => b.frequencyScore - a.frequencyScore)
@@ -945,7 +2366,7 @@ export function buildInitialStudySets(vocab: VocabItem[]): StudySet[] {
 
   const forKeywords = (keywords: string[], limit: number) =>
     uniq([
-      ...vocab
+      ...ejuVocab
         .filter((v) => {
           const haystack = [
             v.word,
@@ -962,7 +2383,7 @@ export function buildInitialStudySets(vocab: VocabItem[]): StudySet[] {
           ].join(" ");
           return keywords.some((keyword) => haystack.includes(keyword));
         }),
-      ...vocab.filter(
+      ...ejuVocab.filter(
         (v) =>
           v.subject === "종합과목" ||
           v.part === "경제" ||
@@ -990,10 +2411,17 @@ export function buildInitialStudySets(vocab: VocabItem[]): StudySet[] {
       .map((v) => v.id);
 
   const highlight = vocab.filter((v) => v.sourceType === "형광펜").map((v) => v.id);
-  const wrong = vocab.filter((v) => v.wrongCount > 0).map((v) => v.id);
+  const wrong: string[] = [];
+  const recentEju = ejuVocab
+    .filter((v) => v.id.startsWith("vocab_recent_eju_"))
+    .slice()
+    .sort((a, b) => b.frequencyScore - a.frequencyScore || b.occurrenceCount - a.occurrenceCount)
+    .slice(0, 100)
+    .map((v) => v.id);
 
   const sets: StudySet[] = [
-    setFromIds("set_top100", "EJU 최빈출 100", "기출 빈도 기준 상위 100단어", "builtin", topFreq),
+    setFromIds("set_top100", "EJU 최빈출 100 v1 (2002~2015)", "2002~2015 기출 분석 기준 상위 100단어", "builtin", topFreq, ["2002~2015", "최빈출 100"]),
+    setFromIds("set_recent_eju_2016_2025", "EJU 최빈출 100 v2 (2016~2025 최신판)", "2016~2025 공개 기출 흐름 기준 최신 상위 100단어", "builtin", recentEju, ["2016~2025", "최신판", "최빈출 100"]),
     setFromIds("set_200", "200점 목표 필수 단어", "기초부터 점수 확보까지", "builtin", forTarget("200점", 140)),
     setFromIds("set_300", "300점 목표 핵심 단어", "빈출 핵심 + 약점 보완", "builtin", forTarget("300점", 160)),
     setFromIds("set_350", "350+ 고득점 단어", "고난도 어휘/학술어/기술문 표현", "builtin", forTarget("350+", 160)),
@@ -1032,13 +2460,31 @@ export function buildInitialStudySets(vocab: VocabItem[]): StudySet[] {
     setFromIds("set_un_peace", "국제기구와 평화", "국제연합, 분쟁, 난민, 평화협력", "builtin", forKeywords(["国連", "国際連合", "国際機関", "紛争", "難民", "平和", "協力", "안보", "분쟁", "난민"], 110), ["국제사회"]),
     setFromIds("set_modern_society", "현대사회 이슈", "정보사회·환경·인구·복지·교육", "builtin", forKeywords(["現代社会", "情報社会", "環境問題", "人口", "福祉", "教育", "高齢化", "少子化", "현대사회", "정보사회", "환경", "인구", "복지", "교육"], 140), ["사회 문제", "환경"]),
     setFromIds("set_environment_global", "환경과 지속가능성", "지구환경 문제, 공해, 자원, 지속가능", "builtin", forKeywords(["環境問題", "地球環境", "温暖化", "公害", "資源", "持続可能", "排出", "환경", "지속가능", "공해"], 120), ["환경"]),
+    setFromIds("set_science_math_course1", "이과 수학 코스1 단어", "집합·명제·식의 계산·함수·좌표 기본 용어", "builtin", forQuestionTypes(["이과 수학", "수학 코스1"], 80), ["EJU 이과", "이과 수학", "수학 코스1"]),
+    setFromIds("set_science_math_advanced", "이과 수학 하이레벨 단어", "삼각비·확률·도형·방정식 심화 용어", "builtin", forQuestionTypes(["하이레벨 수학", "삼각비", "확률"], 80), ["EJU 이과", "하이레벨 수학"]),
+    setFromIds("set_science_biology_ecology", "생물: 생태와 환경", "생태계·먹이그물·생물다양성·물질생산", "builtin", forQuestionTypes(["생물", "생태와 환경", "물질 생산"], 90), ["EJU 이과", "생물", "생태와 환경"]),
+    setFromIds("set_toeic_top_frequency", "TOEIC 5 기출어휘 빈출순", "사용자 제공 TOEIC 5 RC·LC 어휘 섹션 기준, 기본 반복어를 제외한 빈출 어휘", "builtin", forEnglishQuestionTypes(["TOEIC 5 기출", "책 기준 빈출"], 260), ["TOEIC 5", "책 기준", "빈출순"]),
+    setFromIds("set_toeic5_hard_first", "TOEIC 5 어려운 단어 우선", "난이도 3~5만 모아 쉬운 기본어를 건너뛰고 시작", "builtin", forEnglishDifficulty(["TOEIC 5 기출", "책 기준 빈출"], 3, 5, 180), ["TOEIC 5", "난이도 3+", "쉬운 단어 제외"]),
+    setFromIds("set_toeic5_hard_only", "TOEIC 5 고난도 단어", "난이도 4~5 고득점 어휘만 따로 학습", "builtin", forEnglishDifficulty(["TOEIC 5 기출", "책 기준 빈출"], 4, 5, 120), ["TOEIC 5", "고난도", "난이도 4+"]),
+    setFromIds("set_toeic5_core_frequency", "TOEIC 5 빈출 핵심", "난이도 2 이상 중 책 빈도가 높은 단어", "builtin", forEnglishDifficulty(["TOEIC 5 기출", "책 기준 빈출"], 2, 5, 220), ["TOEIC 5", "빈출 핵심", "난이도 2+"]),
+    setFromIds("set_toeic_rc_vocabulary", "TOEIC RC 문서·문법 어휘", "Part 5·6·7 이메일, 공지, 청구서, 광고 핵심어", "builtin", forEnglishQuestionTypes(["TOEIC RC", "이메일·문서", "회계·청구", "채용·인사", "마케팅·영업"], 120), ["TOEIC", "TOEIC RC", "Part 5", "Part 6", "Part 7"]),
+    setFromIds("set_toeic_lc_workplace", "TOEIC LC 업무 상황 표현", "Part 2·3·4 일정 조정, 전화, 공지, 출장 표현", "builtin", forEnglishQuestionTypes(["TOEIC LC", "예약·일정", "공지·방송", "출장·여행", "회의·행사"], 110), ["TOEIC", "TOEIC LC", "Part 2", "Part 3", "Part 4"]),
+    setFromIds("set_toeic_business_phrases", "TOEIC 비즈니스 표현", "메일·회의·고객응대에서 바로 쓰는 실무 표현", "builtin", forEnglishQuestionTypes(["비즈니스 영어", "실무 문장", "메일 표현", "회의 표현", "프로젝트 관리", "고객응대"], 120), ["TOEIC", "비즈니스 영어", "실무 문장"]),
+    setFromIds("set_english_admission", "TOEFL·IELTS 입시 영어", "일본 대학 지원에 필요한 TOEFL·IELTS 표현", "builtin", forEnglishQuestionTypes(["출원 영어", "TOEFL", "IELTS", "아카데믹 영어"], 80), ["출원 영어", "TOEFL", "IELTS"]),
+    setFromIds("set_startup_business_english", "스타트업 실무 영어", "PMF, runway, retention, pitch 같은 현장 어휘", "builtin", forQuestionTypes(["스타트업 영어", "투자 영어", "SaaS 지표", "마케팅 영어", "전문 용어"], 80), ["스타트업 영어", "전문 용어"]),
+    setFromIds("set_business_english_sentences", "비즈니스 영어 문장", "회의·메일·제안에서 바로 쓰는 문장", "builtin", forQuestionTypes(["비즈니스 영어", "실무 문장", "회의 표현"], 60), ["비즈니스 영어", "실무 문장"]),
+    setFromIds("set_business_japanese", "비즈니스 일본어", "메일·회의·일정 조율에 바로 쓰는 정중한 표현", "builtin", forQuestionTypes(["비즈니스 일본어", "메일 표현", "회의 표현", "회사 실무"], 80), ["비즈니스 일본어", "메일 표현"]),
+    setFromIds("set_campus_japanese", "대학생 실사용 일본어", "JLPT·EJU 밖의 신조어, SNS 표현, 캠퍼스 말투", "builtin", forQuestionTypes(["대학생 표현", "신조어", "SNS 표현", "캠퍼스 일본어", "실사용 일본어"], 80), ["대학생 표현", "신조어"]),
     setFromIds("set_highlight", "형광펜 단어장", "스캔으로 추가한 단어", "highlight", highlight),
     setFromIds("set_wrong", "오답 단어장", "틀린 단어부터 다시", "wrong", wrong),
   ];
 
   // Clean empty sets in case of initial dummy state.
   return sets
-    .map((s) => ({ ...s, wordIds: s.wordIds.filter((id) => byId.has(id)), wordCount: s.wordIds.length }))
+    .map((s) => {
+      const wordIds = s.wordIds.filter((id) => byId.has(id));
+      return { ...s, wordIds, wordCount: wordIds.length };
+    })
     .filter((s) => s.wordIds.length >= 8 || s.createdFrom === "builtin");
 }
 
@@ -1052,6 +2498,9 @@ export const EJUEDU_CLASSES: AcademyClass[] = [
     targetScore: "300점 목표",
     level: "N2 전후",
     focus: ["독해", "청독해"],
+    lessonDays: [2, 4],
+    lessonTime: "19:00",
+    lessonDurationMinutes: 90,
     studentIds: ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "s12"],
   },
   {
@@ -1062,6 +2511,9 @@ export const EJUEDU_CLASSES: AcademyClass[] = [
     targetScore: "200점 목표",
     level: "N3~N2",
     focus: ["필수 기초", "독해 기본"],
+    lessonDays: [1, 3],
+    lessonTime: "18:30",
+    lessonDurationMinutes: 90,
     studentIds: ["s13", "s14", "s15", "s16", "s17", "s18", "s19", "s20", "s21", "s22"],
   },
   {
@@ -1072,6 +2524,9 @@ export const EJUEDU_CLASSES: AcademyClass[] = [
     targetScore: "350+ 목표",
     level: "N1 전후",
     focus: ["기술문", "종합과목 연결어"],
+    lessonDays: [6],
+    lessonTime: "15:00",
+    lessonDurationMinutes: 120,
     studentIds: ["s23", "s24", "s25", "s26", "s27", "s28", "s29", "s30"],
   },
 ];
@@ -1135,11 +2590,13 @@ export function buildInitialAssignments(vocab: VocabItem[], sets: StudySet[]): V
   };
 
   const make = (id: string, title: string, classId: string, wordIds: string[], requiredAccuracy: number, teacherMemo: string): VocabularyAssignment => {
+    const cls = EJUEDU_CLASSES.find((c) => c.id === classId);
     const a: VocabularyAssignment = {
       id,
       title,
       classId,
       wordIds,
+      ...(cls ? createPreClassTestAvailability(cls, now) : {}),
       dueDate: dueStr,
       requiredAccuracy,
       teacherMemo,
@@ -1148,7 +2605,6 @@ export function buildInitialAssignments(vocab: VocabItem[], sets: StudySet[]): V
       progressByStudent: {},
       accuracyByStudent: {},
     };
-    const cls = EJUEDU_CLASSES.find((c) => c.id === classId);
     for (const sid of cls?.studentIds || []) {
       const seed = 9000 + sid.length * 97 + id.length * 31;
       const progress = Math.floor(seeded01(seed + 1) * wordIds.length);

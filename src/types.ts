@@ -1,6 +1,25 @@
 ﻿export type UserRole = "student" | "teacher";
 
-export type UserGoal = "EJU" | "JLPT" | "TOEIC" | "other";
+export type UserGoal =
+  | "EJU"
+  | "JLPT"
+  | "TOEIC"
+  | "TOEFL"
+  | "IELTS"
+  | "BusinessEnglish"
+  | "BusinessJapanese"
+  | "CampusJapanese"
+  | "other";
+
+export type LearningCourse =
+  | "EJU_JAPANESE"
+  | "EJU_SOGO"
+  | "EJU_SCIENCE"
+  | "TOEIC_BUSINESS"
+  | "ADMISSION_ENGLISH"
+  | "STARTUP_BUSINESS_ENGLISH"
+  | "BUSINESS_JAPANESE"
+  | "CAMPUS_JAPANESE";
 
 export type SupabaseProfile = {
   id?: string;
@@ -24,16 +43,49 @@ export type LearningRecord = {
   topic: string;
   error_type: string;
   created_at: string;
+  source_set_id?: string;
+  source_set_title?: string;
 };
 
 // Bottom tabs
 export type StudentTab = "home" | "vocab" | "library" | "my";
 export type TeacherTab = "home" | "classes" | "distribute" | "status" | "my";
 
+export type AppOverlayScreen =
+  | { kind: "none" }
+  | { kind: "word"; wordId: string }
+  | { kind: "set"; setId: string }
+  | { kind: "folder"; folderId: string }
+  | { kind: "learn"; title: string; mode: LearnMode; wordIds: string[]; sourceSetId?: string }
+  | { kind: "diagnostic" }
+  | { kind: "report" }
+  | { kind: "class" }
+  | { kind: "homework"; assignmentId: string }
+  | { kind: "t_class"; classId: string }
+  | { kind: "t_student"; studentId: string }
+  | { kind: "t_distribute"; classId: string | null }
+  | { kind: "t_assignment"; assignmentId: string };
+
+export type AppNavigationState = {
+  studentTab?: StudentTab;
+  teacherTab?: TeacherTab;
+  overlay?: AppOverlayScreen;
+  searchQuery?: string;
+  setWordFilter?: { title: string; wordIds: string[] } | null;
+};
+
+export type LearnSessionProgress = {
+  activeMode: LearnMode;
+  index: number;
+  totalCount?: number;
+  showMeaning: boolean;
+  updatedAt: number;
+};
+
 export type Occurrence = {
   year: number;
   session: "제1회" | "제2회";
-  subject: "일본어" | "종합과목" | "기술문" | "청독해" | "한자" | "문법";
+  subject: "일본어" | "영어" | "실용일본어" | "종합과목" | "EJU 이과" | "기술문" | "청독해" | "한자" | "문법";
   part: string;
   questionType: string;
   questionNumber?: number;
@@ -57,10 +109,12 @@ export type TargetScore = "200점" | "300점" | "350+";
 
 export type ReviewStatus = "New" | "Learning" | "Review" | "Mastered";
 
-export type SourceType = "기출분석" | "형광펜" | "선생님세트" | "직접추가";
+export type SourceType = "기출분석" | "큐레이션" | "형광펜" | "선생님세트" | "직접추가";
 
 export type VocabItem = {
   id: string;
+  userId?: string;
+  ownerId?: string;
   word: string;
   reading: string;
   meaningKo: string;
@@ -92,9 +146,11 @@ export type VocabItem = {
 
 export type StudySet = {
   id: string;
+  userId?: string;
+  ownerId?: string;
   title: string;
   description: string;
-  createdFrom: "builtin" | "highlight" | "wrong" | "diagnostic" | "teacher" | "custom";
+  createdFrom: "builtin" | "highlight" | "wrong" | "learning" | "diagnostic" | "teacher" | "custom";
   weakTypes: string[];
   wordIds: string[];
   wordCount: number;
@@ -113,6 +169,8 @@ export type RewardItem = {
 
 export type UserStudyFolder = {
   id: string;
+  userId?: string;
+  ownerId?: string;
   title: string;
   description: string;
   setIds: string[];
@@ -129,10 +187,18 @@ export type StudyStyle =
 
 export type AppLanguage = "한국어" | "日本語" | "中文" | "English";
 
+export type EjuExamPlan = {
+  examDate: string;
+  targetScore: TargetScore;
+  targetScoreValue?: number;
+};
+
 export type StudentSettings = {
   role: UserRole;
+  learningCourse: LearningCourse;
   targetScore: TargetScore;
   examDate: string; // free-form (e.g. 2026.06 EJU)
+  ejuExamPlans: EjuExamPlan[];
   dailyWordGoal: number;
   notificationOn: boolean;
   studyStyle: StudyStyle;
@@ -155,6 +221,23 @@ export type LearnMode =
   | "쓰기 연습"
   | "카드 분류"
   | "오답 복습";
+
+export type StudySessionLog = {
+  id: string;
+  dayKey: string;
+  course: LearningCourse;
+  courseTitle: string;
+  mode: LearnMode;
+  title: string;
+  seconds: number;
+  questionCount: number;
+  correctCount: number;
+  wrongCount: number;
+  knownCount: number;
+  learningCount: number;
+  bonusXP: number;
+  completedAt: number;
+};
 
 export type LearnQuestionKind =
   | "meaning"
@@ -203,6 +286,15 @@ export type QuizQuestion =
 
 export type DiagnosticTestType =
   | "전체 진단"
+  | "EJU 일본어 진단"
+  | "EJU 문과 진단"
+  | "EJU 종합과목 진단"
+  | "EJU 이과 진단"
+  | "TOEIC 어휘 진단"
+  | "입시 영어 진단"
+  | "스타트업 영어 진단"
+  | "비즈니스 일본어 진단"
+  | "대학생 일본어 진단"
   | "목표 점수별 진단"
   | "독해 유형 진단"
   | "청독해 자료형 진단"
@@ -219,12 +311,21 @@ export type DiagnosticResult = {
   questionCount: number;
   correctCount: number;
   accuracy: number; // 0-100
+  comment: string;
+  learningCourse?: LearningCourse;
   weakSubjects: Array<{ key: VocabSubject; wrong: number }>;
   weakQuestionTypes: Array<{ key: string; wrong: number }>;
   weakLevels: Array<{ key: VocabLevel; wrong: number }>;
   mostMissedWordIds: string[];
   recommendedActions: string[];
   weakTypes: string[];
+};
+
+export type AttendanceState = {
+  checkedDates: string[];
+  currentStreak: number;
+  longestStreak: number;
+  lastStudyDate: string | null;
 };
 
 export type WeakTypeStat = {
@@ -247,6 +348,9 @@ export type AcademyClass = {
   targetScore: string;
   level: string;
   focus: string[];
+  lessonDays: Array<0 | 1 | 2 | 3 | 4 | 5 | 6>;
+  lessonTime: string;
+  lessonDurationMinutes: number;
   studentIds: string[];
 };
 
@@ -265,9 +369,17 @@ export type StudentProfile = {
 
 export type VocabularyAssignment = {
   id: string;
+  userId?: string;
+  ownerId?: string;
   title: string;
   classId: string;
   wordIds: string[];
+  assignmentKind?: "단어 과제" | "수업 전 단어 테스트";
+  releaseMode?: "즉시 공개" | "수업 30분 전 공개";
+  availableAt?: string;
+  classStartsAt?: string;
+  unlockMinutesBeforeClass?: number;
+  learnMode?: LearnMode;
   dueDate: string;
   requiredAccuracy: number;
   teacherMemo: string;

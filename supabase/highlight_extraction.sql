@@ -9,7 +9,7 @@ values (
   'vocarush-highlight-files',
   false,
   10485760,
-  array['image/png', 'image/jpeg', 'image/webp', 'application/pdf']
+  array['image/png', 'image/jpeg', 'image/webp', 'image/heic', 'image/heif']
 )
 on conflict (id) do update
 set
@@ -24,7 +24,7 @@ for select
 to authenticated
 using (
   bucket_id = 'vocarush-highlight-files'
-  and (storage.foldername(name))[1] = auth.uid()::text
+  and (storage.foldername(name))[1] = (select auth.uid())::text
 );
 
 drop policy if exists "vocarush_highlight_files_insert_own" on storage.objects;
@@ -34,7 +34,7 @@ for insert
 to authenticated
 with check (
   bucket_id = 'vocarush-highlight-files'
-  and (storage.foldername(name))[1] = auth.uid()::text
+  and (storage.foldername(name))[1] = (select auth.uid())::text
 );
 
 create table if not exists public.vocarush_highlight_uploads (
@@ -59,22 +59,22 @@ create policy "vocarush_highlight_uploads_select_own"
 on public.vocarush_highlight_uploads
 for select
 to authenticated
-using (auth.uid() = user_id);
+using ((select auth.uid()) = user_id);
 
 drop policy if exists "vocarush_highlight_uploads_insert_own" on public.vocarush_highlight_uploads;
 create policy "vocarush_highlight_uploads_insert_own"
 on public.vocarush_highlight_uploads
 for insert
 to authenticated
-with check (auth.uid() = user_id);
+with check ((select auth.uid()) = user_id);
 
 drop policy if exists "vocarush_highlight_uploads_update_own" on public.vocarush_highlight_uploads;
 create policy "vocarush_highlight_uploads_update_own"
 on public.vocarush_highlight_uploads
 for update
 to authenticated
-using (auth.uid() = user_id)
-with check (auth.uid() = user_id);
+using ((select auth.uid()) = user_id)
+with check ((select auth.uid()) = user_id);
 
 create table if not exists public.vocarush_highlight_extracted_words (
   id uuid primary key default gen_random_uuid(),
@@ -91,6 +91,9 @@ create table if not exists public.vocarush_highlight_extracted_words (
 create index if not exists vocarush_highlight_extracted_words_user_created_idx
 on public.vocarush_highlight_extracted_words (user_id, created_at desc);
 
+create index if not exists vocarush_highlight_extracted_words_upload_idx
+on public.vocarush_highlight_extracted_words (upload_id);
+
 alter table public.vocarush_highlight_extracted_words enable row level security;
 
 drop policy if exists "vocarush_highlight_extracted_words_select_own" on public.vocarush_highlight_extracted_words;
@@ -98,11 +101,11 @@ create policy "vocarush_highlight_extracted_words_select_own"
 on public.vocarush_highlight_extracted_words
 for select
 to authenticated
-using (auth.uid() = user_id);
+using ((select auth.uid()) = user_id);
 
 drop policy if exists "vocarush_highlight_extracted_words_insert_own" on public.vocarush_highlight_extracted_words;
 create policy "vocarush_highlight_extracted_words_insert_own"
 on public.vocarush_highlight_extracted_words
 for insert
 to authenticated
-with check (auth.uid() = user_id);
+with check ((select auth.uid()) = user_id);

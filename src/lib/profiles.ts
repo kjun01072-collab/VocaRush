@@ -1,4 +1,5 @@
 import { SupabaseProfile } from "../types";
+import { logInternalError } from "../utils/errors";
 import { supabase } from "./supabase";
 
 const PROFILE_COLUMNS = "id,user_id,name,role,goal,current_level,created_at,updated_at";
@@ -25,12 +26,13 @@ function isMissingTableError(error: unknown) {
 export function profileErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error ?? "");
   const lower = message.toLowerCase();
+  logInternalError(error, "profiles");
 
   if (lower.includes("schema cache") || lower.includes("could not find the table")) {
-    return "프로필 테이블을 찾을 수 없습니다. Supabase에서 vocarush_profiles 테이블을 확인해 주세요.";
+    return "프로필을 준비하는 중 문제가 발생했습니다. 다시 시도해 주세요.";
   }
   if (lower.includes("permission") || lower.includes("rls") || lower.includes("row-level")) {
-    return "프로필 접근 권한이 없습니다. 본인 프로필을 읽고 저장할 수 있는 RLS 정책을 확인해 주세요.";
+    return "프로필 접근 권한을 확인하지 못했습니다. 다시 로그인해 주세요.";
   }
   if (lower.includes("network") || lower.includes("fetch")) {
     return "네트워크 연결을 확인한 뒤 다시 시도해 주세요.";

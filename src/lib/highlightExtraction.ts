@@ -1,4 +1,6 @@
 import { supabase } from "./supabase";
+import { logInternalError, UserFacingError } from "../utils/errors";
+import { validateHighlightUploadFile } from "../utils/validation";
 
 export type HighlightExtractionCandidate = {
   word: string;
@@ -32,13 +34,18 @@ function safeFileName(name: string) {
 
 export async function extractHighlightWordsFromFile(file: UploadableFile): Promise<HighlightExtractionCandidate[]> {
   const client = requireSupabase();
+  const fileValidation = validateHighlightUploadFile(file, "한국어");
+  if (!fileValidation.ok) {
+    throw new UserFacingError(fileValidation.message);
+  }
+
   const {
     data: { user },
     error: userError,
   } = await client.auth.getUser();
 
   if (userError || !user) {
-    throw new Error("로그인 후 실제 추출을 사용할 수 있습니다.");
+    throw new UserFacingError("로그인 후 실제 추출을 사용할 수 있습니다.");
   }
 
   const fileName = safeFileName(file.name || "highlight-upload");
@@ -52,7 +59,8 @@ export async function extractHighlightWordsFromFile(file: UploadableFile): Promi
   });
 
   if (uploadError) {
-    throw new Error(`파일 업로드에 실패했습니다: ${uploadError.message}`);
+    logInternalError(uploadError, "highlightUpload");
+    throw new UserFacingError("파일 업로드에 실패했습니다. 다시 시도해 주세요.");
   }
 
   const { data: uploadRow, error: uploadRowError } = await client
@@ -68,7 +76,8 @@ export async function extractHighlightWordsFromFile(file: UploadableFile): Promi
     .single();
 
   if (uploadRowError || !uploadRow?.id) {
-    throw new Error(`업로드 기록 저장에 실패했습니다: ${uploadRowError?.message || "upload id 없음"}`);
+    logInternalError(uploadRowError || "missing upload id", "highlightUploadRow");
+    throw new UserFacingError("파일 업로드에 실패했습니다. 다시 시도해 주세요.");
   }
 
   const { data, error } = await client.functions.invoke("extract-highlight-words", {
@@ -81,7 +90,8 @@ export async function extractHighlightWordsFromFile(file: UploadableFile): Promi
   });
 
   if (error) {
-    throw new Error(`단어 추출에 실패했습니다: ${error.message}`);
+    logInternalError(error, "highlightFunction");
+    throw new UserFacingError("단어 추출에 실패했습니다. 다시 시도해 주세요.");
   }
 
   const words = (data?.words || []) as HighlightExtractionCandidate[];

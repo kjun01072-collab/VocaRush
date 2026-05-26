@@ -4,7 +4,51 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { Badge, Card, EmptyState, ProgressBar, Row, SectionHeader } from "../components/common";
 import { useI18n } from "../i18n";
 import { COLORS, RADII, SPACING, TYPO } from "../theme";
-import { LearningRecord, RewardItem, StudySet, VocabItem, WeakTypeStat } from "../types";
+import { LearningRecord, RewardItem, StudySet, UserStudyFolder, VocabItem, WeakTypeStat } from "../types";
+
+const MONDAY_FIRST_WEEK_LABELS = ["요일 월", "요일 화", "요일 수", "요일 목", "요일 금", "요일 토", "요일 일"] as const;
+
+type TodayStudyCourseSummary = {
+  courseTitle: string;
+  seconds: number;
+  activityCount: number;
+  questionCount: number;
+  correctCount: number;
+  wrongCount: number;
+  knownCount: number;
+  learningCount: number;
+  bonusXP: number;
+};
+
+type RecentLearningResume = {
+  title: string;
+  mode: string;
+  progressLabel: string;
+  progressPct: number;
+};
+
+function formatDateKey(date: Date) {
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function getMondayStart(date: Date) {
+  const start = new Date(date);
+  const weekday = start.getDay();
+  const diff = weekday === 0 ? -6 : 1 - weekday;
+  start.setDate(start.getDate() + diff);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+function formatStudyTime(seconds: number) {
+  if (seconds <= 0) return "0분";
+  if (seconds < 60) return "1분 미만";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}분`;
+  const hours = Math.floor(minutes / 60);
+  const remain = minutes % 60;
+  return remain ? `${hours}시간 ${remain}분` : `${hours}시간`;
+}
 
 export function StudentHomeScreen({
   studentName,
@@ -15,12 +59,18 @@ export function StudentHomeScreen({
   dailyWordGoal,
   studiedTodayCount,
   streakDays,
+  longestStreak,
+  attendanceDates,
   totalXP,
   storeXP,
   rewardItems,
   redeemedRewardIds,
   learningTodayQuestionCount,
   learningAccuracy,
+  todayStudySeconds,
+  todayStudyBonusXP,
+  todayStudyCourseSummaries,
+  recentLearningResume,
   recentWrongLearningRecords,
   learningRecordWordLabels,
   learningWeakTop3,
@@ -29,22 +79,26 @@ export function StudentHomeScreen({
   wrongReviewWordCount,
   wrongReviewTotalWordCount,
   wrongReviewAttemptCount,
-  recentWrongAttemptCount7d,
   highlightWordCount,
   weakTop3,
+  personalSets,
+  userFolders,
   recommendedSets,
   recentlyStudied,
   classHomeworkSummary,
   onGoVocab,
   onStartTodayLearn,
+  onResumeRecentLearning,
   onStartWrongReview,
   onStartDiagnostic,
   onOpenHighlight,
   onOpenWord,
   onOpenSet,
+  onOpenUserFolder,
   onOpenClass,
   onOpenReport,
   onOpenLibrary,
+  onOpenMy,
   onExchangeReward,
   onWeakTypeReview,
   onWeakTypeCreateSet,
@@ -57,12 +111,18 @@ export function StudentHomeScreen({
   dailyWordGoal: number;
   studiedTodayCount: number;
   streakDays: number;
+  longestStreak: number;
+  attendanceDates: string[];
   totalXP: number;
   storeXP: number;
   rewardItems: RewardItem[];
   redeemedRewardIds: string[];
   learningTodayQuestionCount: number;
   learningAccuracy: number;
+  todayStudySeconds: number;
+  todayStudyBonusXP: number;
+  todayStudyCourseSummaries: TodayStudyCourseSummary[];
+  recentLearningResume: RecentLearningResume | null;
   recentWrongLearningRecords: LearningRecord[];
   learningRecordWordLabels: Record<string, string>;
   learningWeakTop3: Array<{ topic: string; errorType: string; subject: string; wrong: number; attempts: number }>;
@@ -74,6 +134,8 @@ export function StudentHomeScreen({
   recentWrongAttemptCount7d: number;
   highlightWordCount: number;
   weakTop3: WeakTypeStat[];
+  personalSets: StudySet[];
+  userFolders: UserStudyFolder[];
   recommendedSets: StudySet[];
   recentlyStudied: VocabItem[];
   classHomeworkSummary:
@@ -84,17 +146,24 @@ export function StudentHomeScreen({
         dueDateLabel: string;
         progressLabel: string;
         progressPct: number;
+        assignmentKind: string;
+        availabilityStatusLabel: string;
+        availabilityLabel: string;
+        isOpen: boolean;
       };
   onGoVocab: (query?: string) => void;
   onStartTodayLearn: () => void;
+  onResumeRecentLearning: () => void;
   onStartWrongReview: () => void;
   onStartDiagnostic: () => void;
   onOpenHighlight: () => void;
   onOpenWord: (id: string) => void;
   onOpenSet: (id: string) => void;
+  onOpenUserFolder: (id: string) => void;
   onOpenClass: () => void;
   onOpenReport: () => void;
   onOpenLibrary: () => void;
+  onOpenMy: () => void;
   onExchangeReward: (item: RewardItem) => void;
   onWeakTypeReview: (typeName: string) => void;
   onWeakTypeCreateSet: (typeName: string) => void;
@@ -102,6 +171,10 @@ export function StudentHomeScreen({
   const { t, tm } = useI18n();
   const goalPct =
     dailyWordGoal <= 0 ? 0 : Math.min(100, Math.round((studiedTodayCount / dailyWordGoal) * 100));
+  const hasLearningSignal = learningTodayQuestionCount > 0 || wrongReviewWordCount > 0 || wrongReviewAttemptCount > 0;
+  const todayActivityCount = todayStudyCourseSummaries.reduce((sum, item) => sum + item.activityCount, 0);
+  const todayQuestionCount = todayStudyCourseSummaries.reduce((sum, item) => sum + item.questionCount, 0);
+  const todayWrongCount = todayStudyCourseSummaries.reduce((sum, item) => sum + item.wrongCount, 0);
 
   const todayStudySet = recommendedSets[0] || null;
   const recentWrongLabels = useMemo(
@@ -137,6 +210,30 @@ export function StudentHomeScreen({
     ],
     [dailyWordGoal, highlightWordCount, profileGoal, recentWrongLabels, t, todayStudySet, wrongReviewTotalWordCount, wrongReviewWordCount]
   );
+  const quickActions = [
+    { title: "단어 진단", subtitle: "코스별 약점 확인", icon: "pulse-outline" as const, onPress: onStartDiagnostic },
+    { title: "라이브러리", subtitle: "세트 이어하기", icon: "library-outline" as const, onPress: onOpenLibrary },
+    { title: "형광펜", subtitle: `${highlightWordCount}${t("개")} ${t("단어")}`, icon: "color-wand-outline" as const, onPress: onOpenHighlight },
+    { title: "학습 코스", subtitle: "마이에서 변경", icon: "options-outline" as const, onPress: onOpenMy },
+  ];
+  const attendanceWeek = useMemo(() => {
+    const today = new Date();
+    const todayKey = formatDateKey(today);
+    const monday = getMondayStart(today);
+    return Array.from({ length: 7 }).map((_, index) => {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + index);
+      const key = formatDateKey(d);
+      return {
+        key,
+        label: MONDAY_FIRST_WEEK_LABELS[index],
+        done: attendanceDates.includes(key),
+        isToday: key === todayKey,
+      };
+    });
+  }, [attendanceDates]);
+  const weekAttendancePct = Math.round((attendanceWeek.filter((day) => day.done).length / 7) * 100);
+  const didAttendToday = attendanceWeek.some((day) => day.isToday && day.done);
 
   return (
     <ScrollView style={styles.screen} contentContainerStyle={styles.scroll}>
@@ -147,7 +244,7 @@ export function StudentHomeScreen({
           </View>
           <View style={{ flex: 1 }}>
             <Text style={styles.logo}>VocaRush</Text>
-            <Text style={styles.subtitle}>{t("EJU 기출 단어 데이터 중심")}</Text>
+            <Text style={styles.subtitle}>{t("EJU·입시 영어·실무 표현 학습")}</Text>
             {profileGoal || profileLevel ? (
               <Text style={styles.profileLine}>{[profileGoal, profileLevel].filter(Boolean).join(" · ")}</Text>
             ) : null}
@@ -177,11 +274,39 @@ export function StudentHomeScreen({
             }
             onGoVocab(searchQuery);
           }}
+          hitSlop={6}
+          accessibilityRole="button"
+          accessibilityLabel={t("검색")}
           style={({ pressed }) => [styles.searchGo, pressed && { opacity: 0.9 }]}
         >
           <Ionicons name="arrow-forward" size={17} color={COLORS.text} />
         </Pressable>
       </View>
+
+      {recentLearningResume ? (
+        <Pressable
+          onPress={onResumeRecentLearning}
+          style={({ pressed }) => [styles.resumeCard, pressed && { opacity: 0.92 }]}
+          accessibilityRole="button"
+          accessibilityLabel={t("최근 학습 이어가기")}
+        >
+          <Row style={{ justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.kicker}>{t("최근 학습 이어가기")}</Text>
+              <Text style={styles.resumeTitle} numberOfLines={1}>{t(recentLearningResume.title)}</Text>
+              <Text style={styles.resumeMeta}>
+                {t(recentLearningResume.mode)} · {recentLearningResume.progressLabel}
+              </Text>
+            </View>
+            <View style={styles.resumeAction}>
+              <Ionicons name="play" size={18} color={COLORS.text} />
+            </View>
+          </Row>
+          <View style={{ marginTop: 12 }}>
+            <ProgressBar value={recentLearningResume.progressPct} />
+          </View>
+        </Pressable>
+      ) : null}
 
       <Card style={styles.todayCard}>
         <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
@@ -233,10 +358,59 @@ export function StudentHomeScreen({
 
       </Card>
 
+      <SectionHeader title="바로가기" />
+      <View style={styles.quickGrid}>
+        {quickActions.map((action) => (
+          <Pressable
+            key={action.title}
+            onPress={action.onPress}
+            style={({ pressed }) => [styles.quickCard, pressed && { opacity: 0.9 }]}
+          >
+            <View style={styles.quickIcon}>
+              <Ionicons name={action.icon} size={22} color={COLORS.text} />
+            </View>
+            <Text style={styles.quickTitle}>{t(action.title)}</Text>
+            <Text style={styles.quickSubtitle}>{t(action.subtitle)}</Text>
+          </Pressable>
+        ))}
+      </View>
+
+      <SectionHeader title="출석" />
+      <Card style={styles.streakCard}>
+        <Row style={{ alignItems: "center", justifyContent: "space-between" }}>
+          <View>
+            <Text style={styles.streakNumber}>{streakDays}{t("일")}</Text>
+            <Text style={styles.mutedSmall}>{t("현재 연속 출석")} · {t("최고")} {longestStreak}{t("일")}</Text>
+          </View>
+          <View style={styles.streakRight}>
+            <Badge label={didAttendToday ? "오늘 출석 완료" : "오늘 학습 전"} tone={didAttendToday ? "success" : "gold"} />
+            <View style={styles.streakFlame}>
+              <Ionicons name="flame" size={28} color={COLORS.gold} />
+            </View>
+          </View>
+        </Row>
+        <View style={styles.attendanceProgressRow}>
+          <Text style={styles.mutedSmall}>{t("이번 주 출석률")}</Text>
+          <Text style={styles.attendancePct}>{weekAttendancePct}%</Text>
+        </View>
+        <ProgressBar value={weekAttendancePct} />
+        <View style={styles.weekRow}>
+          {attendanceWeek.map((day) => (
+            <View key={day.key} style={styles.weekDay}>
+              <Text style={[styles.weekLabel, day.isToday && styles.weekLabelToday]}>{t(day.label)}</Text>
+              <View style={[styles.weekDot, day.done && styles.weekDotDone, day.isToday && styles.weekDotToday]}>
+                {day.done ? <Ionicons name="checkmark" size={15} color={COLORS.text} /> : null}
+              </View>
+              <Text style={[styles.todayMarker, !day.isToday && styles.todayMarkerHidden]}>{t("오늘")}</Text>
+            </View>
+          ))}
+        </View>
+      </Card>
+
       <SectionHeader
         title="오늘 요약"
         right={
-          <Pressable onPress={onOpenReport} hitSlop={8}>
+          <Pressable onPress={onOpenReport} hitSlop={8} accessibilityRole="button" accessibilityLabel={t("리포트")}>
             <Text style={styles.rightHint}>{t("리포트")}</Text>
           </Pressable>
         }
@@ -244,25 +418,56 @@ export function StudentHomeScreen({
       <Card>
         <View style={styles.summaryStrip}>
           <View style={styles.summaryItem}>
-            <Text style={styles.statTitle}>{t("푼 문제")}</Text>
-            <Text style={styles.statValue}>{learningTodayQuestionCount}{t("개")}</Text>
+            <Text style={styles.statTitle}>{t("공부 시간")}</Text>
+            <Text style={styles.statValue}>{formatStudyTime(todayStudySeconds)}</Text>
           </View>
           <View style={styles.summaryDivider} />
           <View style={styles.summaryItem}>
-            <Text style={styles.statTitle}>{t("정답률")}</Text>
-            <Text style={styles.statValue}>{learningAccuracy}%</Text>
+            <Text style={styles.statTitle}>{t("완료 활동")}</Text>
+            <Text style={styles.statValue}>{todayActivityCount}{t("회")}</Text>
           </View>
           <View style={styles.summaryDivider} />
           <View style={styles.summaryItem}>
-            <Text style={styles.statTitle}>{t("복습")}</Text>
-            <Text style={styles.statValue}>{reviewTodayCount}{t("개")}</Text>
+            <Text style={styles.statTitle}>{t("완료 보너스")}</Text>
+            <Text style={styles.statValue}>+{todayStudyBonusXP} XP</Text>
           </View>
         </View>
-        <Text style={styles.mutedSmall}>
-          {wrongReviewWordCount
-            ? `${t("이번 주 오답")} ${wrongReviewWordCount}${t("개")} · ${t("최근")} 7${t("일")} ${recentWrongAttemptCount7d}${t("회")}`
-            : t("아직 실제 오답 기록이 없습니다.")}
-        </Text>
+        {todayStudyCourseSummaries.length ? (
+          <View style={styles.courseSummaryList}>
+            {todayStudyCourseSummaries.slice(0, 3).map((item) => {
+              const solved = item.correctCount + item.wrongCount;
+              const accuracy = solved ? Math.round((item.correctCount / solved) * 100) : null;
+              return (
+                <View key={item.courseTitle} style={styles.courseSummaryRow}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.courseSummaryTitle}>{t(item.courseTitle)}</Text>
+                    <Text style={styles.mutedSmall}>
+                      {formatStudyTime(item.seconds)} · {item.questionCount}{t("개")} · {item.activityCount}{t("회")}
+                    </Text>
+                  </View>
+                  <View style={styles.courseSummaryBadge}>
+                    <Text style={styles.courseSummaryBadgeText}>
+                      {accuracy !== null
+                        ? `${accuracy}%`
+                        : item.learningCount
+                        ? `${t("학습 중")} ${item.learningCount}`
+                        : `+${item.bonusXP} XP`}
+                    </Text>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : (
+          <Text style={styles.mutedSmall}>
+            {t("아직 완료한 학습 세션이 없습니다. 낱말카드나 테스트를 끝까지 진행하면 시간이 기록됩니다.")}
+          </Text>
+        )}
+        {hasLearningSignal && todayQuestionCount ? (
+          <Text style={styles.mutedSmall}>
+            {t("오늘 정답률")} {learningAccuracy}% · {t("오답")} {todayWrongCount}{t("개")}
+          </Text>
+        ) : null}
       </Card>
       {learningSaveError ? <Text style={styles.saveError}>{learningSaveError}</Text> : null}
 
@@ -275,15 +480,20 @@ export function StudentHomeScreen({
           >
             <View style={{ flex: 1 }}>
               <Text style={styles.homeworkTitle}>{t(classHomeworkSummary.title)}</Text>
+              <Row style={{ marginTop: 8, flexWrap: "wrap" }}>
+                <Badge label={t(classHomeworkSummary.assignmentKind)} tone={classHomeworkSummary.assignmentKind === "수업 전 단어 테스트" ? "violet" : "default"} />
+                <Badge label={t(classHomeworkSummary.availabilityStatusLabel)} tone={classHomeworkSummary.isOpen ? "blue" : "default"} />
+              </Row>
               <Text style={styles.mutedSmall}>
                 {t(classHomeworkSummary.className)} · {t("마감")}: {classHomeworkSummary.dueDateLabel}
               </Text>
+              <Text style={styles.mutedSmall}>{t("공개")}: {classHomeworkSummary.availabilityLabel}</Text>
               <View style={{ marginTop: 10 }}>
                 <ProgressBar value={classHomeworkSummary.progressPct} />
                 <Text style={styles.mutedSmall}>{t("진행률")}: {classHomeworkSummary.progressLabel}</Text>
               </View>
             </View>
-            <Badge label={t("이어하기")} tone="blue" />
+            <Badge label={t(classHomeworkSummary.isOpen ? "이어하기" : "대기")} tone={classHomeworkSummary.isOpen ? "blue" : "default"} />
           </Pressable>
         </>
       ) : null}
@@ -303,10 +513,54 @@ export function StudentHomeScreen({
         </Card>
       ) : null}
 
+      {personalSets.length || userFolders.length ? (
+        <>
+          <SectionHeader title="개인 학습" right={<Text style={styles.rightHint}>{t("홈에서 관리")}</Text>} />
+          {userFolders.slice(0, 2).map((folder) => (
+            <Pressable
+              key={folder.id}
+              onPress={() => onOpenUserFolder(folder.id)}
+              style={({ pressed }) => [styles.setCard, styles.personalSetCard, pressed && { opacity: 0.9 }]}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.setTitle}>{t(folder.title)}</Text>
+                <Text style={styles.mutedSmall} numberOfLines={1}>
+                  {t(folder.description)}
+                </Text>
+                <Text style={styles.mutedSmall}>
+                  {folder.setIds.length ? `${folder.setIds.length}${t("개 세트")}` : t("빈 폴더")}
+                </Text>
+              </View>
+              <View style={[styles.setChip, styles.personalSetChip]}>
+                <Text style={styles.setChipText}>{t("폴더")}</Text>
+              </View>
+            </Pressable>
+          ))}
+          {personalSets.slice(0, 3).map((s) => (
+            <Pressable
+              key={s.id}
+              onPress={() => onOpenSet(s.id)}
+              style={({ pressed }) => [styles.setCard, styles.personalSetCard, pressed && { opacity: 0.9 }]}
+            >
+              <View style={{ flex: 1 }}>
+                <Text style={styles.setTitle}>{t(s.title)}</Text>
+                <Text style={styles.mutedSmall} numberOfLines={1}>
+                  {t(s.description)}
+                </Text>
+                <Text style={styles.mutedSmall}>{t("단어")} {s.wordCount}{t("개")} · {t("진행")} {s.progress}%</Text>
+              </View>
+              <View style={[styles.setChip, styles.personalSetChip]}>
+                <Text style={styles.setChipText}>{t(s.createdFrom === "teacher" ? "과제" : "개인")}</Text>
+              </View>
+            </Pressable>
+          ))}
+        </>
+      ) : null}
+
       <SectionHeader
         title="추천 세트"
         right={
-          <Pressable onPress={onOpenLibrary} hitSlop={8}>
+          <Pressable onPress={onOpenLibrary} hitSlop={8} accessibilityRole="button" accessibilityLabel={t("전체 보기")}>
             <Text style={styles.rightHint}>{t("전체 보기")}</Text>
           </Pressable>
         }
@@ -409,8 +663,26 @@ const styles = StyleSheet.create({
   },
   searchIcon: { color: COLORS.muted, fontSize: TYPO.h2 },
   searchInput: { flex: 1, color: COLORS.text, fontWeight: "700", fontSize: TYPO.body },
-  searchGo: { backgroundColor: COLORS.blue, borderRadius: 999, width: 34, height: 34, justifyContent: "center", alignItems: "center" },
+  searchGo: { backgroundColor: COLORS.blue, borderRadius: 999, width: 44, height: 44, justifyContent: "center", alignItems: "center" },
   searchGoText: { color: COLORS.text, fontWeight: "800" },
+  resumeCard: {
+    marginTop: SPACING.lg,
+    borderRadius: RADII.cardLg,
+    backgroundColor: "#171D46",
+    borderWidth: 1,
+    borderColor: "rgba(103,217,255,0.28)",
+    padding: 16,
+  },
+  resumeTitle: { color: COLORS.text, fontWeight: "900", fontSize: TYPO.h2, lineHeight: TYPO.h2Line, marginTop: 4 },
+  resumeMeta: { color: COLORS.muted, fontWeight: "800", fontSize: TYPO.small, lineHeight: TYPO.smallLine, marginTop: 4 },
+  resumeAction: {
+    width: 46,
+    height: 46,
+    borderRadius: 23,
+    backgroundColor: COLORS.blue,
+    justifyContent: "center",
+    alignItems: "center",
+  },
   todayCard: { marginTop: SPACING.lg, borderColor: "rgba(105,215,255,0.16)" },
   kicker: { color: "#C9D0FF", fontWeight: "800", fontSize: TYPO.small, letterSpacing: 0.2 },
   rightHint: { color: "#BCA8FF", fontWeight: "800" },
@@ -467,6 +739,26 @@ const styles = StyleSheet.create({
     borderColor: COLORS.lineSoft,
   },
   secondaryBtnText: { color: COLORS.text, fontWeight: "800" },
+  quickGrid: { flexDirection: "row", flexWrap: "wrap", gap: SPACING.md },
+  quickCard: { width: "48%", minHeight: 118, borderRadius: RADII.card, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.lineSoft, padding: 14 },
+  quickIcon: { width: 38, height: 38, borderRadius: 19, backgroundColor: "rgba(80,98,255,0.22)", justifyContent: "center", alignItems: "center" },
+  quickTitle: { color: COLORS.text, fontWeight: "900", fontSize: TYPO.h3, marginTop: 10 },
+  quickSubtitle: { color: COLORS.muted, fontWeight: "700", fontSize: TYPO.small, lineHeight: TYPO.smallLine, marginTop: 3 },
+  streakCard: { borderColor: "rgba(246,200,95,0.22)" },
+  streakNumber: { color: COLORS.text, fontWeight: "900", fontSize: 36 },
+  streakRight: { alignItems: "flex-end", gap: 8 },
+  streakFlame: { width: 54, height: 54, borderRadius: 27, backgroundColor: "rgba(246,200,95,0.16)", borderWidth: 1, borderColor: "rgba(246,200,95,0.24)", justifyContent: "center", alignItems: "center" },
+  attendanceProgressRow: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 14, marginBottom: 8 },
+  attendancePct: { color: COLORS.gold, fontWeight: "900", fontSize: TYPO.small },
+  weekRow: { flexDirection: "row", justifyContent: "space-between", marginTop: 14 },
+  weekDay: { alignItems: "center", gap: 7 },
+  weekLabel: { color: COLORS.muted, fontWeight: "900", fontSize: TYPO.micro },
+  weekLabelToday: { color: COLORS.text },
+  weekDot: { width: 30, height: 30, borderRadius: 15, borderWidth: 1, borderColor: COLORS.lineSoft, backgroundColor: COLORS.card2, justifyContent: "center", alignItems: "center" },
+  weekDotDone: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },
+  weekDotToday: { borderColor: COLORS.gold, borderWidth: 2 },
+  todayMarker: { color: COLORS.gold, fontWeight: "900", fontSize: 10, lineHeight: 12 },
+  todayMarkerHidden: { opacity: 0 },
   homeworkCard: {
     backgroundColor: COLORS.card,
     borderRadius: RADII.cardLg,
@@ -482,6 +774,28 @@ const styles = StyleSheet.create({
   summaryStrip: { flexDirection: "row", alignItems: "center" },
   summaryItem: { flex: 1 },
   summaryDivider: { width: 1, height: 42, backgroundColor: COLORS.lineSoft, marginHorizontal: 10 },
+  courseSummaryList: { gap: 10, marginTop: 14 },
+  courseSummaryRow: {
+    minHeight: 64,
+    borderRadius: 16,
+    backgroundColor: COLORS.card2,
+    borderWidth: 1,
+    borderColor: COLORS.lineSoft,
+    padding: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  courseSummaryTitle: { color: COLORS.text, fontWeight: "900", fontSize: TYPO.body, lineHeight: TYPO.bodyLine },
+  courseSummaryBadge: {
+    minHeight: 36,
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    backgroundColor: "rgba(80,98,255,0.22)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  courseSummaryBadgeText: { color: COLORS.text, fontWeight: "900", fontSize: TYPO.small },
   grid2: { flexDirection: "row", flexWrap: "wrap", gap: SPACING.md },
   gridCard: { width: "48%" },
   statTitle: { color: COLORS.muted, fontWeight: "800", fontSize: TYPO.small },
@@ -516,7 +830,9 @@ const styles = StyleSheet.create({
     marginBottom: 10,
   },
   setTitle: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h3, marginBottom: 2 },
+  personalSetCard: { borderColor: "rgba(103,217,255,0.24)", backgroundColor: "#171D46" },
   setChip: { backgroundColor: "#2A245B", borderRadius: 999, paddingHorizontal: 10, paddingVertical: 7 },
+  personalSetChip: { backgroundColor: "rgba(103,217,255,0.14)" },
   setChipText: { color: "#C7B8FF", fontWeight: "800", fontSize: TYPO.micro },
   storeNotice: { marginBottom: SPACING.md, borderColor: "rgba(246,200,95,0.22)" },
   storeIcon: {

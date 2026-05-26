@@ -325,7 +325,7 @@ export function AuthScreen() {
             </View>
             <View style={styles.brandText}>
               <Text style={styles.logo}>VocaRush</Text>
-              <Text style={styles.subtitle}>EJU 기출 단어 데이터 중심 학습</Text>
+              <Text style={styles.subtitle}>EJU·입시 영어·실무 표현 학습</Text>
             </View>
           </View>
 

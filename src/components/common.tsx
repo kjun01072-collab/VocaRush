@@ -1,7 +1,7 @@
 ﻿import React from "react";
 import { Pressable, StyleProp, StyleSheet, Text, View, ViewStyle } from "react-native";
 import { useI18n } from "../i18n";
-import { COLORS, FONT_WEIGHT, RADII, SPACING, TYPO } from "../theme";
+import { COLORS, FONT_WEIGHT, PRESS_FEEDBACK, RADII, SPACING, TYPO } from "../theme";
 
 export function Card({
   children,
@@ -63,10 +63,11 @@ export function IconButton({
   return (
     <Pressable
       onPress={onPress}
+      hitSlop={6}
       style={({ pressed }) => [
         styles.iconBtn,
         tone === "blue" ? styles.iconBtnBlue : styles.iconBtnDefault,
-        pressed && { opacity: 0.85 },
+        pressed && (tone === "blue" ? PRESS_FEEDBACK.strong : PRESS_FEEDBACK.soft),
       ]}
       accessibilityRole="button"
       accessibilityLabel={t(label)}
@@ -89,10 +90,14 @@ export function PillButton({
   return (
     <Pressable
       onPress={onPress}
+      hitSlop={6}
+      accessibilityRole="button"
+      accessibilityState={{ selected: Boolean(selected) }}
+      accessibilityLabel={t(label)}
       style={({ pressed }) => [
         styles.pill,
         selected ? styles.pillActive : styles.pillInactive,
-        pressed && { opacity: 0.9 },
+        pressed && (selected ? PRESS_FEEDBACK.strong : PRESS_FEEDBACK.soft),
       ]}
     >
       <Text style={[styles.pillText, selected && styles.pillTextActive]} numberOfLines={1}>
@@ -105,7 +110,11 @@ export function PillButton({
 export function ProgressBar({ value }: { value: number }) {
   const w = `${Math.max(0, Math.min(100, value))}%` as `${number}%`;
   return (
-    <View style={styles.progressTrack}>
+    <View
+      style={styles.progressTrack}
+      accessibilityRole="progressbar"
+      accessibilityValue={{ min: 0, max: 100, now: Math.round(Math.max(0, Math.min(100, value))) }}
+    >
       <View style={[styles.progressFill, { width: w }]} />
     </View>
   );
@@ -166,7 +175,11 @@ export function Collapsible({
     <View style={styles.collapseWrap}>
       <Pressable
         onPress={onToggle}
-        style={({ pressed }) => [styles.collapseHeader, pressed && { opacity: 0.9 }]}
+        hitSlop={6}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+        accessibilityLabel={t(title)}
+        style={({ pressed }) => [styles.collapseHeader, pressed && PRESS_FEEDBACK.soft]}
       >
         <Text style={styles.collapseTitle}>{t(title)}</Text>
         <Text style={styles.collapseChevron}>{open ? "−" : "+"}</Text>
@@ -219,12 +232,15 @@ const styles = StyleSheet.create({
   iconBtnBlue: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },
   iconBtnText: { color: COLORS.text, fontSize: TYPO.h3, lineHeight: TYPO.h3Line, fontWeight: FONT_WEIGHT.bold },
   pill: {
+    minHeight: 44,
+    minWidth: 44,
     borderRadius: RADII.pill,
     borderWidth: 1,
     borderColor: COLORS.lineSoft,
     paddingHorizontal: 12,
     paddingVertical: 10,
     maxWidth: 210,
+    justifyContent: "center",
   },
   pillInactive: { backgroundColor: COLORS.card2 },
   pillActive: { backgroundColor: COLORS.blue, borderColor: COLORS.blue },

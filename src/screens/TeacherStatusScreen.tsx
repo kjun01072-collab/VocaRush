@@ -4,6 +4,7 @@ import { Badge, Card, PillButton, ProgressBar, Row, SectionHeader } from "../com
 import { useI18n } from "../i18n";
 import { COLORS, RADII, TYPO } from "../theme";
 import { AcademyClass, StudentProfile, VocabularyAssignment } from "../types";
+import { getAssignmentAvailability } from "../utils/assignmentAvailability";
 
 export function TeacherStatusScreen({
   classes,
@@ -63,6 +64,7 @@ export function TeacherStatusScreen({
             .map((a) => {
               const cls = classes.find((c) => c.id === a.classId);
               const pct = completionRate(a);
+              const availability = getAssignmentAvailability(a);
               return (
                 <Pressable
                   key={a.id}
@@ -71,9 +73,14 @@ export function TeacherStatusScreen({
                 >
                   <View style={{ flex: 1 }}>
                     <Text style={styles.itemTitle}>{t(a.title)}</Text>
+                    <Row style={{ marginTop: 8, flexWrap: "wrap" }}>
+                      <Badge label={t(a.assignmentKind || "단어 과제")} tone={a.assignmentKind === "수업 전 단어 테스트" ? "violet" : "default"} />
+                      <Badge label={t(availability.statusLabel)} tone={availability.isOpen ? "blue" : "default"} />
+                    </Row>
                     <Text style={styles.muted}>
                       {cls ? t(cls.name) : "-"} · {t("단어")} {a.wordIds.length}{t("개")} · {t("마감")} {a.dueDate}
                     </Text>
+                    <Text style={styles.muted}>{t("공개")}: {availability.availableLabel}</Text>
                     <Text style={styles.muted}>{t("완료율")} {pct}% · {t("필수 정답률")} {a.requiredAccuracy}%</Text>
                     <View style={{ marginTop: 10 }}>
                       <ProgressBar value={pct} />

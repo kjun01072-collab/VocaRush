@@ -1,10 +1,13 @@
 ﻿import React, { useMemo, useState } from "react";
-import { Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Badge, Card, Row, SectionHeader } from "../components/common";
 import { useI18n } from "../i18n";
 import { COLORS, RADII, TYPO } from "../theme";
 import { VocabItem } from "../types";
 import { HighlightExtractionCandidate } from "../lib/highlightExtraction";
+import { getSafeErrorMessage, logInternalError } from "../utils/errors";
+import { validateHighlightUploadFile } from "../utils/validation";
+import { pickDocumentUploadFile, pickImageUploadFile } from "../utils/uploadFiles";
 
 const DUMMY_EXTRACTED = [
   { word: "少子化", reading: "しょうしか", meaningKo: "저출산", category: "종합과목/사회", confidence: 94 },
@@ -12,6 +15,11 @@ const DUMMY_EXTRACTED = [
   { word: "根拠", reading: "こんきょ", meaningKo: "근거", category: "기술문/논리", confidence: 88 },
   { word: "需要", reading: "じゅよう", meaningKo: "수요", category: "종합과목/경제", confidence: 87 },
 ];
+
+function displayHighlightLabel(label: string) {
+  if (label === "출원 영어") return "TOEFL·IELTS";
+  return label;
+}
 
 export function HighlightModal({
   visible,
@@ -26,7 +34,7 @@ export function HighlightModal({
   onAddExtractedWords: (items: Array<{ word: string; reading: string; meaningKo: string }>) => void;
   onExtractFile?: (file: Blob & { name?: string; type?: string }) => Promise<HighlightExtractionCandidate[]>;
 }) {
-  const { t, tm } = useI18n();
+  const { t, tm, language } = useI18n();
   const [loading, setLoading] = useState(false);
   const [done, setDone] = useState(false);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
@@ -49,7 +57,8 @@ export function HighlightModal({
         setExtracted(DUMMY_EXTRACTED);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      logInternalError(error, "highlightModal.scan");
+      const message = getSafeErrorMessage(error, language);
       Alert.alert(t("분석 데모로 전환"), `${t("실제 추출에 실패해 샘플 결과를 표시합니다.")}\n${message}`);
       setExtracted(DUMMY_EXTRACTED);
     } finally {
@@ -58,20 +67,23 @@ export function HighlightModal({
     }
   }
 
-  function pickUpload(kind: "사진" | "파일") {
-    if (Platform.OS !== "web") {
-      scan(kind === "사진" ? "교재 사진 데모" : "단어 파일 데모", kind);
-      return;
-    }
-
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = kind === "사진" ? "image/*" : "image/*,.pdf,.png,.jpg,.jpeg,.webp";
-    input.onchange = () => {
-      const file = input.files?.[0];
+  async function pickUpload(kind: "사진" | "파일") {
+    try {
+      const file =
+        kind === "사진"
+          ? await pickImageUploadFile()
+          : await pickDocumentUploadFile(["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"]);
+      if (!file) return;
+      const validation = validateHighlightUploadFile(file, language);
+      if (!validation.ok) {
+        Alert.alert(t("파일 업로드"), validation.message);
+        return;
+      }
       scan(file?.name || (kind === "사진" ? "교재 사진" : "업로드 파일"), kind, file);
-    };
-    input.click();
+    } catch (error) {
+      logInternalError(error, "highlightModal.pickUpload");
+      Alert.alert(t("파일 업로드"), getSafeErrorMessage(error, language));
+    }
   }
 
   function toggle(key: string) {
@@ -94,7 +106,7 @@ export function HighlightModal({
   const matchReason = (w: { word: string; reading: string; meaningKo: string }) => {
     const hit = vocab.find((v) => v.word === w.word || v.reading === w.reading);
     if (!hit) return `${t("DB 매칭")}: ${t("신규 단어")}`;
-    return `${t("DB 매칭")}: ${t(hit.subject)} / ${t(hit.part)} · ${t("기출")} ${hit.occurrenceCount}${t("회")}`;
+    return `${t("DB 매칭")}: ${t(hit.subject)} / ${t(displayHighlightLabel(hit.part))} · ${t("기출")} ${hit.occurrenceCount}${t("회")}`;
   };
 
   return (
@@ -103,7 +115,7 @@ export function HighlightModal({
         <ScrollView style={styles.screen} contentContainerStyle={styles.scroll}>
           <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
             <Text style={styles.pageTitle}>{t("형광펜 단어 추가")}</Text>
-            <Pressable onPress={close} style={({ pressed }) => [styles.closeBtn, pressed && { opacity: 0.9 }]}>
+            <Pressable onPress={close} style={({ pressed }) => [styles.closeBtn, pressed && { opacity: 0.9 }]} accessibilityRole="button" accessibilityLabel={t("닫기")}>
               <Text style={styles.closeText}>×</Text>
             </Pressable>
           </Row>
@@ -113,19 +125,19 @@ export function HighlightModal({
           </Text>
 
           <View style={styles.uploadGrid}>
-            <Pressable onPress={() => pickUpload("사진")} style={({ pressed }) => [styles.uploadBtn, pressed && { opacity: 0.9 }]}>
+            <Pressable onPress={() => pickUpload("사진")} style={({ pressed }) => [styles.uploadBtn, pressed && { opacity: 0.9 }]} accessibilityRole="button" accessibilityLabel={t("사진 업로드")}>
               <Text style={styles.uploadIcon}>▧</Text>
               <Text style={styles.uploadTitle}>{t("사진 업로드")}</Text>
               <Text style={styles.uploadHelp}>{t("교재 사진")}</Text>
             </Pressable>
-            <Pressable onPress={() => pickUpload("파일")} style={({ pressed }) => [styles.uploadBtn, pressed && { opacity: 0.9 }]}>
+            <Pressable onPress={() => pickUpload("파일")} style={({ pressed }) => [styles.uploadBtn, pressed && { opacity: 0.9 }]} accessibilityRole="button" accessibilityLabel={t("파일 업로드")}>
               <Text style={styles.uploadIcon}>▤</Text>
               <Text style={styles.uploadTitle}>{t("파일 업로드")}</Text>
-              <Text style={styles.uploadHelp}>PDF / JPG / PNG</Text>
+              <Text style={styles.uploadHelp}>JPG / PNG / WEBP</Text>
             </Pressable>
           </View>
 
-          <Pressable onPress={() => scan(sourceName || "샘플 이미지", sourceType || "사진")} style={({ pressed }) => [styles.scanBox, pressed && { opacity: 0.9 }]}>
+          <Pressable onPress={() => scan(sourceName || "샘플 이미지", sourceType || "사진")} style={({ pressed }) => [styles.scanBox, pressed && { opacity: 0.9 }]} accessibilityRole="button" accessibilityLabel={t("추출 후보 보기")}>
             <Text style={styles.scanIcon}>{loading ? "…" : "⌕"}</Text>
             <Text style={styles.scanTitle}>{t(loading ? "분석 중..." : "추출 후보 보기")}</Text>
             <Text style={styles.muted}>
@@ -144,6 +156,9 @@ export function HighlightModal({
                   <Pressable
                     key={w.word}
                     onPress={() => toggle(w.word)}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isOn }}
+                    accessibilityLabel={`${w.word}, ${w.reading}, ${tm(w.meaningKo)}`}
                     style={({ pressed }) => [styles.wordCard, pressed && { opacity: 0.9 }, isOn && styles.wordCardOn]}
                   >
                     <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
@@ -163,7 +178,7 @@ export function HighlightModal({
                 );
               })}
 
-              <Pressable onPress={addSelected} style={({ pressed }) => [styles.primaryBtn, pressed && { opacity: 0.9 }]}>
+              <Pressable onPress={addSelected} style={({ pressed }) => [styles.primaryBtn, pressed && { opacity: 0.9 }]} accessibilityRole="button" accessibilityLabel={t("선택 단어 추가")}>
                 <Text style={styles.primaryBtnText}>{t("선택 단어 추가")}</Text>
               </Pressable>
             </>

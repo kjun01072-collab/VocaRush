@@ -6,6 +6,9 @@ const corsHeaders = {
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
+const SAFE_GENERIC_ERROR = "문제가 발생했습니다. 다시 시도해 주세요.";
+const SAFE_ANALYSIS_ERROR = "단어 추출에 실패했습니다. 다시 시도해 주세요.";
+
 type ExtractedWord = {
   word: string;
   reading: string;
@@ -63,7 +66,8 @@ Deno.serve(async (req) => {
   const openaiKey = Deno.env.get("OPENAI_API_KEY");
 
   if (!supabaseUrl || !anonKey || !serviceRoleKey || !openaiKey) {
-    return jsonResponse({ error: "서버 환경변수가 설정되지 않았습니다." }, 500);
+    console.warn("[extract-highlight-words] missing_server_secret");
+    return jsonResponse({ error: SAFE_GENERIC_ERROR }, 500);
   }
 
   const authHeader = req.headers.get("Authorization") || "";
@@ -81,7 +85,15 @@ Deno.serve(async (req) => {
     return jsonResponse({ error: "로그인이 필요합니다." }, 401);
   }
 
-  const { uploadId, filePath, fileName, mimeType } = await req.json();
+  let body: { uploadId?: string; filePath?: string; fileName?: string; mimeType?: string };
+  try {
+    body = await req.json();
+  } catch (error) {
+    console.warn("[extract-highlight-words] invalid_json", error);
+    return jsonResponse({ error: SAFE_GENERIC_ERROR }, 400);
+  }
+
+  const { uploadId, filePath, fileName, mimeType } = body;
 
   if (!uploadId || !filePath || !mimeType) {
     return jsonResponse({ error: "uploadId, filePath, mimeType이 필요합니다." }, 400);
@@ -93,7 +105,7 @@ Deno.serve(async (req) => {
 
   try {
     if (!String(mimeType).startsWith("image/")) {
-      throw new Error("현재 자동 추출은 이미지 파일만 지원합니다. PDF는 이미지로 캡처해서 올려주세요.");
+      return jsonResponse({ error: "이미지 파일만 업로드할 수 있습니다." }, 400);
     }
 
     const { data: fileData, error: downloadError } = await serviceClient.storage
@@ -101,7 +113,8 @@ Deno.serve(async (req) => {
       .download(filePath);
 
     if (downloadError || !fileData) {
-      throw new Error(downloadError?.message || "파일을 불러오지 못했습니다.");
+      console.warn("[extract-highlight-words] download_failed", downloadError);
+      throw new Error("download_failed");
     }
 
     const bytes = new Uint8Array(await fileData.arrayBuffer());
@@ -144,11 +157,18 @@ Deno.serve(async (req) => {
 
     if (!openaiResponse.ok) {
       const detail = await openaiResponse.text();
-      throw new Error(`OpenAI 분석 실패: ${detail.slice(0, 300)}`);
+      console.warn("[extract-highlight-words] openai_failed", openaiResponse.status, detail.slice(0, 300));
+      throw new Error("openai_failed");
     }
 
     const openaiData = await openaiResponse.json();
-    const words = parseWords(getOutputText(openaiData));
+    let words: ExtractedWord[] = [];
+    try {
+      words = parseWords(getOutputText(openaiData));
+    } catch (error) {
+      console.warn("[extract-highlight-words] parse_failed", error);
+      throw new Error("parse_failed");
+    }
 
     await serviceClient
       .from("vocarush_highlight_uploads")
@@ -172,13 +192,13 @@ Deno.serve(async (req) => {
 
     return jsonResponse({ uploadId, fileName, words });
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    console.warn("[extract-highlight-words] internal_error", error);
     await serviceClient
       .from("vocarush_highlight_uploads")
-      .update({ status: "failed", updated_at: new Date().toISOString(), error_message: message })
+      .update({ status: "failed", updated_at: new Date().toISOString(), error_message: "analysis_failed" })
       .eq("id", uploadId)
       .eq("user_id", user.id);
 
-    return jsonResponse({ error: message }, 500);
+    return jsonResponse({ error: SAFE_ANALYSIS_ERROR }, 500);
   }
 });

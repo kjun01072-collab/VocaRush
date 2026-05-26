@@ -1,3 +1,5 @@
+import type { ViewStyle } from "react-native";
+
 export const COLORS = {
   bg: "#07091F",
   panel: "#101331",
@@ -69,6 +71,38 @@ export const FONT_WEIGHT = {
   bold: "700",
   heavy: "800",
 } as const;
+
+export const PRESS_FEEDBACK: Record<"soft" | "strong" | "nav", ViewStyle> = {
+  soft: {
+    transform: [{ scale: 0.975 }],
+    backgroundColor: "rgba(255,255,255,0.10)",
+    borderColor: "rgba(255,255,255,0.18)",
+    shadowColor: "#8EA0FF",
+    shadowOpacity: 0.24,
+    shadowRadius: 16,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+  strong: {
+    transform: [{ scale: 0.965 }],
+    backgroundColor: "rgba(80,98,255,0.26)",
+    borderColor: "rgba(255,255,255,0.22)",
+    shadowColor: "#5062FF",
+    shadowOpacity: 0.34,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 10,
+  },
+  nav: {
+    transform: [{ scale: 0.94 }],
+    backgroundColor: "rgba(255,255,255,0.12)",
+    shadowColor: "#5062FF",
+    shadowOpacity: 0.26,
+    shadowRadius: 14,
+    shadowOffset: { width: 0, height: 7 },
+    elevation: 8,
+  },
+};
 
 export function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));

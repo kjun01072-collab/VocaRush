@@ -35,9 +35,14 @@ npx.cmd expo start --web --port 8082
 ```env
 EXPO_PUBLIC_SUPABASE_URL=https://your-project-ref.supabase.co
 EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY=your-publishable-key
+EXPO_PUBLIC_SITE_URL=https://vocarush.vercel.app/
 ```
 
 `OPENAI_API_KEY`, `SUPABASE_SERVICE_ROLE_KEY` 같은 서버용 키는 Expo 앱에 넣지 않습니다. Supabase Edge Function Secrets에만 저장합니다.
+
+> Developer note: Do not expose server-side API keys in the Expo client. Use a backend proxy or Supabase Edge Function for AI calls.
+
+Google 로그인 설정값은 [docs/google-login-setup.md](docs/google-login-setup.md)를 확인합니다. Google Client Secret은 Supabase Auth Provider에만 저장하고 Expo/Vercel public env에는 넣지 않습니다.
 
 ## Supabase SQL
 

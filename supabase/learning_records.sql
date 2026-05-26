@@ -24,11 +24,11 @@ create policy "vocarush_learning_records_select_own"
 on public.vocarush_learning_records
 for select
 to authenticated
-using (auth.uid() = user_id);
+using ((select auth.uid()) = user_id);
 
 drop policy if exists "vocarush_learning_records_insert_own" on public.vocarush_learning_records;
 create policy "vocarush_learning_records_insert_own"
 on public.vocarush_learning_records
 for insert
 to authenticated
-with check (auth.uid() = user_id);
+with check ((select auth.uid()) = user_id);

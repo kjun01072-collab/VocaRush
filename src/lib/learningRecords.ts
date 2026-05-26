@@ -1,4 +1,5 @@
 import { LearningRecord } from "../types";
+import { logInternalError } from "../utils/errors";
 import { supabase } from "./supabase";
 
 const RECORD_COLUMNS =
@@ -26,12 +27,13 @@ function isMissingTableError(error: unknown) {
 export function learningRecordErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error ?? "");
   const lower = message.toLowerCase();
+  logInternalError(error, "learningRecords");
 
   if (lower.includes("schema cache") || lower.includes("could not find the table")) {
-    return "학습 기록 테이블을 찾을 수 없습니다. Supabase에서 vocarush_learning_records 테이블을 확인해 주세요.";
+    return "학습 기록을 준비하는 중 문제가 발생했습니다. 다시 시도해 주세요.";
   }
   if (lower.includes("permission") || lower.includes("rls") || lower.includes("row-level")) {
-    return "학습 기록 저장 권한이 없습니다. vocarush_learning_records RLS 정책을 확인해 주세요.";
+    return "학습 기록 저장 권한을 확인하지 못했습니다. 다시 로그인해 주세요.";
   }
   if (lower.includes("network") || lower.includes("fetch")) {
     return "네트워크 문제로 학습 기록을 저장하지 못했습니다.";
