@@ -4,7 +4,7 @@ import Ionicons from "@expo/vector-icons/Ionicons";
 import { Badge, Card, EmptyState, ProgressBar, Row, SectionHeader } from "../components/common";
 import { useI18n } from "../i18n";
 import { COLORS, RADII, SPACING, TYPO } from "../theme";
-import { LearningRecord, RewardItem, StudySet, UserStudyFolder, VocabItem, WeakTypeStat } from "../types";
+import { LearningRecord, RewardItem, StudySet, UserStudyFolder, VocabItem } from "../types";
 
 const MONDAY_FIRST_WEEK_LABELS = ["요일 월", "요일 화", "요일 수", "요일 목", "요일 금", "요일 토", "요일 일"] as const;
 
@@ -80,7 +80,6 @@ export function StudentHomeScreen({
   wrongReviewTotalWordCount,
   wrongReviewAttemptCount,
   highlightWordCount,
-  weakTop3,
   personalSets,
   userFolders,
   recommendedSets,
@@ -100,7 +99,6 @@ export function StudentHomeScreen({
   onOpenLibrary,
   onOpenMy,
   onExchangeReward,
-  onWeakTypeReview,
   onWeakTypeCreateSet,
 }: {
   studentName: string;
@@ -133,7 +131,6 @@ export function StudentHomeScreen({
   wrongReviewAttemptCount: number;
   recentWrongAttemptCount7d: number;
   highlightWordCount: number;
-  weakTop3: WeakTypeStat[];
   personalSets: StudySet[];
   userFolders: UserStudyFolder[];
   recommendedSets: StudySet[];
@@ -165,7 +162,6 @@ export function StudentHomeScreen({
   onOpenLibrary: () => void;
   onOpenMy: () => void;
   onExchangeReward: (item: RewardItem) => void;
-  onWeakTypeReview: (typeName: string) => void;
   onWeakTypeCreateSet: (typeName: string) => void;
 }) {
   const { t, tm } = useI18n();
@@ -498,21 +494,6 @@ export function StudentHomeScreen({
         </>
       ) : null}
 
-      {weakTop3[0] ? (
-        <Card style={styles.weakCompactCard}>
-          <Row style={{ justifyContent: "space-between", alignItems: "center" }}>
-            <View style={{ flex: 1 }}>
-              <Text style={styles.statTitle}>{t("가장 약한 유형")}</Text>
-              <Text style={styles.weakTitle}>{t(weakTop3[0].typeName)}</Text>
-              <Text style={styles.mutedSmall}>{t("정답률")} {weakTop3[0].accuracy}% · {weakTop3[0].attempts}{t("문제")}</Text>
-            </View>
-            <Pressable style={styles.compactAction} onPress={() => onWeakTypeReview(weakTop3[0].typeName)}>
-              <Text style={styles.compactActionText}>{t("복습")}</Text>
-            </Pressable>
-          </Row>
-        </Card>
-      ) : null}
-
       {personalSets.length || userFolders.length ? (
         <>
           <SectionHeader title="개인 학습" right={<Text style={styles.rightHint}>{t("홈에서 관리")}</Text>} />
@@ -805,19 +786,6 @@ const styles = StyleSheet.create({
   recordTitle: { color: COLORS.text, fontWeight: "900", fontSize: TYPO.body, lineHeight: TYPO.bodyLine },
   recordAnswer: { color: COLORS.gold, fontWeight: "800", fontSize: TYPO.small, maxWidth: 150 },
   saveError: { color: COLORS.red, fontSize: TYPO.small, lineHeight: TYPO.smallLine, fontWeight: "800", marginTop: 8 },
-  weakCompactCard: { marginTop: SPACING.md, borderColor: "rgba(105,215,255,0.16)" },
-  weakTitle: { color: COLORS.text, fontWeight: "800", fontSize: TYPO.h3 },
-  compactAction: {
-    minHeight: 42,
-    borderRadius: 999,
-    paddingHorizontal: 16,
-    backgroundColor: COLORS.card2,
-    borderWidth: 1,
-    borderColor: COLORS.lineSoft,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  compactActionText: { color: COLORS.text, fontWeight: "900", fontSize: TYPO.small },
   setCard: {
     backgroundColor: COLORS.card,
     borderRadius: RADII.card,

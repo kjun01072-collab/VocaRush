@@ -2737,7 +2737,6 @@ function AppContent({
           wrongReviewAttemptCount={wrongReviewAttemptCount}
           recentWrongAttemptCount7d={recentWrongAttemptCount7d}
           highlightWordCount={highlightWordCount}
-          weakTop3={weakTop3}
           personalSets={personalHomeSets}
           userFolders={userFolders}
           recommendedSets={recommendedSets}
@@ -2767,10 +2766,6 @@ function AppContent({
           onOpenLibrary={() => switchStudentTab("library")}
           onOpenMy={() => switchStudentTab("my")}
           onExchangeReward={exchangeReward}
-          onWeakTypeReview={(typeName) => {
-            const ids = vocab.filter((v) => v.questionTypes.includes(typeName)).slice(0, 80).map((v) => v.id);
-            openLearn(ids, `${typeName} 복습`, "유형별 퀴즈");
-          }}
           onWeakTypeCreateSet={(typeName) => createWeakSet(typeName)}
         />
       ) : null}
